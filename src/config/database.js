@@ -1,3 +1,5 @@
+// src/config/database.js
+
 require("dotenv").config();
 
 module.exports = {
@@ -20,6 +22,15 @@ module.exports = {
       underscored: true,
       underscoredAll: true,
     },
+    dialectOptions: {
+      ssl:
+        process.env.DB_SSL === "true"
+          ? {
+              require: true,
+              rejectUnauthorized: false,
+            }
+          : false,
+    },
   },
   test: {
     username: process.env.DB_USER || "postgres",
@@ -39,6 +50,15 @@ module.exports = {
       timestamps: true,
       underscored: true,
       underscoredAll: true,
+    },
+    dialectOptions: {
+      ssl:
+        process.env.DB_SSL === "true"
+          ? {
+              require: true,
+              rejectUnauthorized: false,
+            }
+          : false,
     },
   },
   production: {

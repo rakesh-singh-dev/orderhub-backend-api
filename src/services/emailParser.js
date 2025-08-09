@@ -3,8 +3,82 @@
 const cheerio = require("cheerio");
 const { platforms } = require("../config/emailConfig");
 const { normalizeOrderId, normalizeText } = require("../utils/normalize");
-const extractAmazonOrderDetails = require("./extractAmazonOrderDetails");
 const logger = require("../utils/logger").createModuleLogger("EmailParser");
+
+// FIXED: Extract order date from email content
+function extractOrderDate(content, subject) {
+  try {
+    // Try to extract date from subject first
+    const subjectDateMatch = subject.match(
+      /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/
+    );
+    if (subjectDateMatch) {
+      const date = new Date(subjectDateMatch[1]);
+      if (!isNaN(date.getTime())) {
+        return date;
+      }
+    }
+
+    // Try to extract date from content
+    const datePatterns = [
+      /Order\s*Date[:\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/gi,
+      /Date[:\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/gi,
+      /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/g,
+    ];
+
+    for (const pattern of datePatterns) {
+      const match = content.match(pattern);
+      if (match && match[1]) {
+        const date = new Date(match[1]);
+        if (!isNaN(date.getTime())) {
+          return date;
+        }
+      }
+    }
+
+    // Fallback to current date
+    return new Date();
+  } catch (error) {
+    logger.debug("Date extraction failed:", error.message);
+    return new Date();
+  }
+}
+
+// FIXED: Extract Swiggy fees and charges
+function extractSwiggyFees(content) {
+  const fees = [];
+
+  try {
+    const feePatterns = [
+      /Handling\s*Fee[:\s]*₹\s*([\d,]+\.?\d*)/gi,
+      /Convenience\s*Fee[:\s]*₹\s*([\d,]+\.?\d*)/gi,
+      /Delivery\s*Partner\s*Fee[:\s]*₹\s*([\d,]+\.?\d*)/gi,
+      /Item\s*Bill[:\s]*₹\s*([\d,]+\.?\d*)/gi,
+    ];
+
+    for (const pattern of feePatterns) {
+      let match;
+      while ((match = pattern.exec(content)) !== null) {
+        const feeName = match[0].split("₹")[0].trim();
+        const amount = parseFloat(match[1].replace(/,/g, ""));
+
+        if (amount > 0) {
+          fees.push({
+            name: feeName,
+            quantity: 1,
+            price: amount,
+            isFee: true,
+          });
+        }
+      }
+      pattern.lastIndex = 0;
+    }
+  } catch (error) {
+    logger.error("Error extracting Swiggy fees:", error);
+  }
+
+  return fees;
+}
 
 // Fixed extraction function
 function extractFieldByPatterns(content, patterns) {
@@ -40,7 +114,7 @@ function extractFieldByPatterns(content, patterns) {
   return null;
 }
 
-// FIXED: Enhanced Amazon item extraction
+// FIXED: Enhanced Amazon item extraction - focus on products, not addresses
 function extractAmazonItems(html, text) {
   console.log("🔍 Amazon items extraction starting...");
   const items = [];
@@ -217,7 +291,7 @@ function extractAmazonItems(html, text) {
   return deduplicatedItems;
 }
 
-// Enhanced Flipkart item extraction (UNCHANGED - keeping your existing code)
+// FIXED: Enhanced Flipkart item extraction with proper price mapping
 function extractFlipkartItems(html, text) {
   const items = [];
   const content = html || text || "";
@@ -252,11 +326,12 @@ function extractFlipkartItems(html, text) {
       });
     }
 
-    // Method 2: Text pattern extraction
+    // Method 2: Text pattern extraction with better price patterns
     if (items.length === 0) {
       const itemPatterns = [
-        /([A-Za-z][^₨\n\r]{15,120})\s*Seller[:\s]*[^\n\r]*\s*Qty[:\s]*(\d+)/gi,
-        /([A-Za-z][^₨\n\r]{15,120})\s*Qty[:\s]*(\d+)/gi,
+        /([A-Za-z][^₨\n]{15,150})\s*Seller[:\s]*[^\n\r]*\s*Qty[:\s]*(\d+)\s*₨\.\s*([\d,]+\.?\d*)/gi,
+        /([A-Za-z][^₨\n]{15,150})\s*Qty[:\s]*(\d+)\s*₨\.\s*([\d,]+\.?\d*)/gi,
+        /([A-Za-z][^₨\n]{15,150})\s*₨\.\s*([\d,]+\.?\d*)/gi,
       ];
 
       for (const pattern of itemPatterns) {
@@ -268,7 +343,7 @@ function extractFlipkartItems(html, text) {
             items.push({
               name: name,
               quantity: parseInt(match[2]) || 1,
-              price: 0.0,
+              price: match[3] ? parseFloat(match[3].replace(/,/g, "")) : 0.0,
             });
           }
         }
@@ -304,7 +379,7 @@ function extractFlipkartItems(html, text) {
   return deduplicateItems(items);
 }
 
-// NEW: Swiggy item extraction
+// FIXED: Enhanced Swiggy item extraction with fees
 function extractSwiggyItems(html, text) {
   console.log("🔍 Swiggy items extraction starting...");
   const items = [];
@@ -382,6 +457,12 @@ function extractSwiggyItems(html, text) {
         if (items.length > 0) break; // Stop if we found items
       }
     }
+
+    // Method 3: Extract fees and charges
+    const fees = extractSwiggyFees(content);
+    if (fees.length > 0) {
+      items.push(...fees);
+    }
   } catch (error) {
     console.error("❌ Error extracting Swiggy items:", error);
   }
@@ -436,6 +517,7 @@ function deduplicateItems(items) {
         name: item.name,
         quantity: item.quantity || 1,
         price: item.price || 0.0,
+        isFee: item.isFee || false,
       });
     }
   }
@@ -634,27 +716,28 @@ module.exports = {
 
       logger.info(`Order ID found: ${orderId}`);
 
-      // 3. ENHANCED Amount extraction
+      // 3. FIXED: Enhanced Amount extraction with validation
       let totalAmount = null;
 
       if (platformConfig.name === "amazon") {
         console.log("🔍 Amazon amount extraction starting...");
 
-        // Enhanced Amazon amount patterns
+        // ENHANCED: More specific Amazon amount patterns
         const amountPatterns = [
-          // Primary patterns - most specific
-          /(?:Grand\s+)?Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
+          // MOST SPECIFIC PATTERNS FIRST
           /Order\s+Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
+          /Grand\s+Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
+          /Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)\s*(?!.*item|.*qty|.*x\s)/i, // Total not followed by item indicators
+
+          // HTML table patterns for totals
+          /<td[^>]*>.*?Total.*?<\/td>[\s\S]*?₹\s*([\d,]+(?:\.\d+)?)/i,
+
+          // Subtotal patterns as fallback
           /Item\s+Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
           /Subtotal[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
 
-          // More flexible patterns
-          /Total\s+Amount[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
-          /Amount[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
-          /₹\s*([\d,]+(?:\.\d+)?)\s*(?:total|amount)/i,
-
-          // Fallback - any amount over ₹50
-          /₹\s*((?:[1-9]\d{2,}|[5-9]\d)(?:\.\d+)?)/i,
+          // More flexible patterns but exclude small amounts
+          /₹\s*((?:[2-9]\d{2,}|[1-9]\d{3,})(?:\.\d+)?)\s*(?!.*item|.*qty|.*x\s)/i, // ₹200+ not item-related
         ];
 
         let bestAmount = null;
@@ -673,9 +756,9 @@ module.exports = {
               } found: "${amountStr}" = ₹${amountValue}`
             );
 
-            // Choose the highest reasonable amount (likely the order total)
-            if (amountValue > bestAmountValue && amountValue >= 20) {
-              // Min ₹20 for Amazon
+            // For Amazon, prioritize higher amounts (likely order totals)
+            if (amountValue > bestAmountValue && amountValue >= 50) {
+              // Min ₹50 for Amazon orders
               bestAmount = amountStr;
               bestAmountValue = amountValue;
               console.log(`✅ New best Amazon amount: ₹${amountValue}`);
@@ -690,6 +773,11 @@ module.exports = {
           );
         } else {
           console.log("❌ No valid Amazon amount found");
+          // Debug: Show order total context
+          const orderTotalContext = content.match(
+            /Order\s+Total[\s\S]{0,100}/i
+          );
+          console.log("📄 Order Total context:", orderTotalContext?.[0]);
         }
       } else if (platformConfig.name === "flipkart") {
         console.log("🔍 Starting Flipkart amount extraction...");
@@ -827,70 +915,11 @@ module.exports = {
         platformConfig.trackingPatterns
       );
 
-      // 5. FIXED: Extract items based on platform (disable conflicting Amazon function)
+      // 5. FIXED: Extract items based on platform
       let items = [];
-      let amazonOrderDetails = null;
 
       if (platformConfig.name === "amazon") {
-        console.log("🔍 Amazon amount extraction starting...");
-
-        // ENHANCED: More specific Amazon amount patterns
-        const amountPatterns = [
-          // MOST SPECIFIC PATTERNS FIRST
-          /Order\s+Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
-          /Grand\s+Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
-          /Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)\s*(?!.*item|.*qty|.*x\s)/i, // Total not followed by item indicators
-
-          // HTML table patterns for totals
-          /<td[^>]*>.*?Total.*?<\/td>[\s\S]*?₹\s*([\d,]+(?:\.\d+)?)/i,
-
-          // Subtotal patterns as fallback
-          /Item\s+Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
-          /Subtotal[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i,
-
-          // More flexible patterns but exclude small amounts
-          /₹\s*((?:[2-9]\d{2,}|[1-9]\d{3,})(?:\.\d+)?)\s*(?!.*item|.*qty|.*x\s)/i, // ₹200+ not item-related
-        ];
-
-        let bestAmount = null;
-        let bestAmountValue = 0;
-
-        // Try each pattern and find the best match
-        for (let i = 0; i < amountPatterns.length; i++) {
-          const matches = content.match(amountPatterns[i]);
-          if (matches && matches[1]) {
-            const amountStr = matches[1];
-            const amountValue = parseFloat(amountStr.replace(/,/g, ""));
-
-            console.log(
-              `💰 Amazon Pattern ${
-                i + 1
-              } found: "${amountStr}" = ₹${amountValue}`
-            );
-
-            // For Amazon, prioritize higher amounts (likely order totals)
-            if (amountValue > bestAmountValue && amountValue >= 50) {
-              // Min ₹50 for Amazon orders
-              bestAmount = amountStr;
-              bestAmountValue = amountValue;
-              console.log(`✅ New best Amazon amount: ₹${amountValue}`);
-            }
-          }
-        }
-
-        if (bestAmount) {
-          totalAmount = bestAmountValue;
-          console.log(
-            `🎯 Final Amazon amount: ${bestAmount} -> ₹${totalAmount}`
-          );
-        } else {
-          console.log("❌ No valid Amazon amount found");
-          // Debug: Show order total context
-          const orderTotalContext = content.match(
-            /Order\s+Total[\s\S]{0,100}/i
-          );
-          console.log("📄 Order Total context:", orderTotalContext?.[0]);
-        }
+        items = extractAmazonItems(html, text);
       } else if (platformConfig.name === "flipkart") {
         items = extractFlipkartItems(html, text);
       } else if (platformConfig.name === "swiggy") {
@@ -903,7 +932,10 @@ module.exports = {
         );
       }
 
-      // 6. FIXED: Status detection with normalization
+      // 6. FIXED: Extract order date
+      const orderDate = extractOrderDate(content, subject);
+
+      // 7. FIXED: Status detection with normalization
       let status = "ordered";
       if (platformConfig.statusKeywords) {
         for (const [statusKey, keywords] of Object.entries(
@@ -918,11 +950,12 @@ module.exports = {
 
       const result = {
         platform: platformConfig.name,
-        orderId: amazonOrderDetails?.order_id || normalizeOrderId(orderId),
-        totalAmount: amazonOrderDetails?.total || totalAmount,
+        orderId: normalizeOrderId(orderId),
+        totalAmount: totalAmount,
         items,
-        status: normalizeStatus(amazonOrderDetails?.status || status), // APPLY NORMALIZATION
-        deliveryEta: amazonOrderDetails?.delivery_eta,
+        status: normalizeStatus(status), // APPLY NORMALIZATION
+        orderDate: orderDate, // FIXED: Add order date
+        deliveryEta: null,
         deliveryAddress: deliveryAddress
           ? normalizeText(deliveryAddress)
           : null,
@@ -934,12 +967,14 @@ module.exports = {
       console.log("📊 FINAL PARSING RESULT:", {
         platform: platformConfig.name,
         orderId: result.orderId,
+        orderDate: result.orderDate,
         totalAmount: result.totalAmount,
         itemsCount: items.length,
         items: items.map((item) => ({
           name: item.name?.substring(0, 50) + "...",
           quantity: item.quantity,
           price: item.price,
+          isFee: item.isFee,
         })),
       });
 
@@ -952,6 +987,7 @@ module.exports = {
             nameLength: item.name?.length || 0,
             hasQuantity: typeof item.quantity === "number",
             hasPrice: typeof item.price === "number",
+            isFee: item.isFee,
             structure: Object.keys(item),
           });
         });
@@ -962,6 +998,7 @@ module.exports = {
       logger.info(`Order parsed successfully`, {
         platform: result.platform,
         orderId: result.orderId,
+        orderDate: result.orderDate,
         itemsCount: items.length,
         amount: result.totalAmount,
       });
