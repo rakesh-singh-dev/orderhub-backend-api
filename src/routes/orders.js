@@ -1,7 +1,7 @@
 // backend/src/routes/orders.js - ENHANCED WITH ORDER ITEMS
 const express = require("express");
 const { Op } = require("sequelize");
-const { authenticateJWT } = require("../middleware/auth");
+const { authenticateJWT } = require("../middleware/authentication");
 const {
   catchAsync,
   AppError,
@@ -271,7 +271,7 @@ router.get(
         success: false,
         message: "Failed to fetch orders",
         error:
-          process.env.NODE_ENV === "development" ? error.message : undefined,
+          (process.env.NODE_ENV === "development" || process.env.DEBUG_MODE === "true") ? error.message : undefined,
       });
     }
   })
@@ -412,7 +412,7 @@ router.get(
           required: false,
         },
       ],
-      limit: 3,
+      limit: parseInt(process.env.PAGINATION_DEFAULT_LIMIT) || 3,
       order: [["created_at", "DESC"]],
     });
 

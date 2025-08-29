@@ -85,7 +85,7 @@ module.exports = (sequelize, DataTypes) => {
 
   User.prototype.needsTokenRefresh = function () {
     if (!this.token_expires_at) return true;
-    const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
+    const bufferTime = parseInt(process.env.TOKEN_BUFFER_TIME_MS) || 5 * 60 * 1000; // 5 minutes buffer
     return new Date(this.token_expires_at) <= new Date(Date.now() + bufferTime);
   };
 

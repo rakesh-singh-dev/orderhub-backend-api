@@ -1,10 +1,13 @@
 const express = require("express");
 const passport = require("passport");
-const { generateToken, verifyToken } = require("../middleware/auth");
+const {
+  generateToken,
+  verifyToken,
+  authenticateJWT,
+} = require("../middleware/authentication");
 const logger = require("../utils/logger");
 const { globalErrorHandler } = require("../middleware/errorHandler");
 const { google } = require("googleapis");
-const { authenticateJWT } = require("../middleware/auth");
 const { User } = require("../models");
 const router = express.Router();
 

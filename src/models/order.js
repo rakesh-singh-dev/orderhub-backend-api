@@ -1,4 +1,5 @@
-// backend/src/models/order.js - UPDATED VERSION
+// backend/src/models/order.js - UPDATED: Removed quick delivery platforms
+
 module.exports = (sequelize, DataTypes) => {
   const Order = sequelize.define(
     "Order",
@@ -21,10 +22,18 @@ module.exports = (sequelize, DataTypes) => {
           "amazon",
           "flipkart",
           "myntra",
-          "swiggy",
           "nykaa",
+          "ajio",
+          "meesho",
+          "bigbasket",
+          "firstcry",
+          "tatacliq",
+          "snapdeal",
+          "paytmmall",
+          "reliancedigital",
           "generic",
           "other"
+          // REMOVED: "swiggy", "blinkit", "zepto", "dominos"
         ),
         allowNull: false,
       },
@@ -32,13 +41,11 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: false,
       },
-      // ADD MISSING COLUMN - This is what was causing the error!
       platform_order_id: {
         type: DataTypes.STRING,
         allowNull: false,
         comment: "The actual order ID from the e-commerce platform",
       },
-      // ADD MISSING PRODUCT FIELDS
       product_name: {
         type: DataTypes.STRING,
         allowNull: true,
@@ -49,7 +56,8 @@ module.exports = (sequelize, DataTypes) => {
       },
       total_amount: {
         type: DataTypes.DECIMAL(10, 2),
-        allowNull: false,
+        allowNull: true,
+        defaultValue: 0,
         validate: {
           min: 0,
         },
@@ -72,7 +80,7 @@ module.exports = (sequelize, DataTypes) => {
           "delivered",
           "cancelled",
           "returned",
-          "unknown" // Add unknown status
+          "unknown"
         ),
         defaultValue: "ordered",
       },
@@ -80,7 +88,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: true,
       },
-      // ADD MISSING DELIVERY FIELDS
       expected_delivery: {
         type: DataTypes.DATE,
         allowNull: true,
@@ -93,7 +100,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.JSONB,
         allowNull: true,
       },
-      // ADD MISSING EMAIL FIELDS
       email_message_id: {
         type: DataTypes.STRING,
         allowNull: true,
@@ -106,7 +112,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.JSONB,
         allowNull: true,
       },
-      // ADD MISSING TRACKING FIELDS
       tracking_number: {
         type: DataTypes.STRING,
         allowNull: true,
@@ -123,7 +128,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.JSONB,
         allowNull: true,
       },
-      // ADD MISSING CONFIDENCE FIELD
       confidence_score: {
         type: DataTypes.DECIMAL(3, 2),
         allowNull: true,
@@ -133,17 +137,14 @@ module.exports = (sequelize, DataTypes) => {
           max: 1,
         },
       },
-      // ADD MISSING RAW DATA FIELD
       raw_data: {
         type: DataTypes.JSONB,
         allowNull: true,
       },
-      // ADD MISSING EMAIL ID FIELD
       email_id: {
         type: DataTypes.STRING,
         allowNull: true,
       },
-      // ADD SYNC ID FIELD
       sync_id: {
         type: DataTypes.STRING,
         allowNull: true,
@@ -182,7 +183,7 @@ module.exports = (sequelize, DataTypes) => {
         },
         {
           unique: true,
-          fields: ["user_id", "platform", "platform_order_id"], // Update unique constraint
+          fields: ["user_id", "platform", "platform_order_id"],
         },
       ],
     }
@@ -217,6 +218,14 @@ module.exports = (sequelize, DataTypes) => {
     platform,
     options = {}
   ) {
+    // Block quick delivery platforms
+    if (["swiggy", "blinkit", "zepto"].includes(platform.toLowerCase())) {
+      console.log(
+        `⚠️ Platform ${platform} not supported (quick delivery app excluded)`
+      );
+      return [];
+    }
+
     return await this.findAll({
       where: { user_id: userId, platform },
       include: ["OrderItems"],
@@ -227,7 +236,13 @@ module.exports = (sequelize, DataTypes) => {
 
   Order.getOrderStats = async function (userId, dateRange = {}) {
     const { startDate, endDate } = dateRange;
-    const whereClause = { user_id: userId };
+    const whereClause = {
+      user_id: userId,
+      // Exclude quick delivery platforms from stats
+      platform: {
+        [sequelize.Sequelize.Op.notIn]: ["swiggy", "blinkit", "zepto"],
+      },
+    };
 
     if (startDate && endDate) {
       whereClause.order_date = {

@@ -10,7 +10,7 @@ require("dotenv").config();
 const logger = require("./utils/logger");
 const db = require("./models");
 const { globalErrorHandler } = require("./middleware/errorHandler");
-const { passport } = require("./middleware/auth");
+const { passport } = require("./middleware/authentication");
 const authRoutes = require("./routes/auth");
 const orderRoutes = require("./routes/orders");
 const syncRoutes = require("./routes/sync");
@@ -18,30 +18,34 @@ const syncRoutes = require("./routes/sync");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.set("trust proxy", true);
+app.set("trust proxy", process.env.TRUST_PROXY === "true");
 
 // Security middleware
-app.use(helmet());
+if (process.env.HELMET_ENABLED !== "false") {
+  app.use(helmet());
+}
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:19006",
-    credentials: true,
+    origin: process.env.CORS_ORIGIN || process.env.FRONTEND_URL || "http://localhost:19006",
+    credentials: process.env.CORS_CREDENTIALS === "true",
   })
 );
 
 // Rate limiting
 if (process.env.NODE_ENV === "production") {
   const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100,
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
     message: "Too many requests from this IP, please try again later.",
   });
   app.use("/api/", limiter);
 }
 
 // Body parsing middleware
-app.use(compression());
-app.use(express.json({ limit: "10mb" }));
+if (process.env.COMPRESSION_ENABLED !== "false") {
+  app.use(compression());
+}
+app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // Initialize Passport
@@ -85,7 +89,7 @@ const startServer = async () => {
     await db.sequelize.authenticate();
     logger.info("Database connection established successfully.");
 
-    if (process.env.NODE_ENV !== "production") {
+    if (process.env.NODE_ENV !== "production" && process.env.DB_SYNC_ALTER === "true") {
       await db.sequelize.sync({ alter: true });
       logger.info("Database synchronized successfully.");
     }
