@@ -1,3 +1,5 @@
 .env
 email_logs/
 gmail_debug_logs/
+node_modules/
+src.zip

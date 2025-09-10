@@ -1,19 +1,22 @@
-// src/services/parsers/index.js - UPDATED: Removed quick delivery apps
+// src/services/parsers/index.js - ENHANCED PARSER FACTORY
+// Ensures your enhanced parsers are properly used
 
 const AmazonParser = require("./amazonParser");
 const FlipkartParser = require("./flipkartParser");
+const SwiggyParser = require("./swiggyParser");
 const MyntraParser = require("./myntraParser");
-const NykaaParser = require("./nykaaParser");
+const BlinkitParser = require("./blinkitParser");
 const GenericParser = require("./genericParser");
 
 class ParserFactory {
   constructor() {
-    // Initialize parsers (removed Swiggy, Blinkit, Zepto)
+    // Initialize all parsers
     this.parsers = {
       amazon: new AmazonParser(),
       flipkart: new FlipkartParser(),
+      swiggy: new SwiggyParser(),
       myntra: new MyntraParser(),
-      nykaa: new NykaaParser(),
+      blinkit: new BlinkitParser(),
       generic: new GenericParser(),
     };
   }
@@ -22,7 +25,7 @@ class ParserFactory {
    * 🎯 ENHANCED: Parse email with better platform detection and debugging
    */
   parseEmail(emailData) {
-    console.log("\n📧 PARSER FACTORY: Starting email parsing...");
+    console.log("\n🔧 PARSER FACTORY: Starting email parsing...");
     console.log(`📧 From: ${emailData.from}`);
     console.log(`📧 Subject: ${emailData.subject?.substring(0, 60)}...`);
 
@@ -88,14 +91,14 @@ class ParserFactory {
   }
 
   /**
-   * UPDATED: Detect platform from email (removed quick delivery apps)
+   * ENHANCED: Detect platform from email with STRICTER filtering
    */
   detectPlatform(emailData) {
     const from = (emailData.from || "").toLowerCase();
     const subject = (emailData.subject || "").toLowerCase();
     const content = (emailData.html || emailData.text || "").toLowerCase();
 
-    // Platform detection for e-commerce only (no quick delivery)
+    // Enhanced platform detection with multiple indicators
     const platformIndicators = {
       amazon: [
         "amazon.in",
@@ -106,9 +109,10 @@ class ParserFactory {
         "amazon.in order",
         "order-update@amazon",
       ],
-      flipkart: ["flipkart.com", "nct.flipkart.com", "@flipkart", "flipkart"],
+      flipkart: ["flipkart.com", "@flipkart", "flipkart"],
+      swiggy: ["swiggy.in", "@swiggy", "swiggy", "instamart"],
       myntra: ["myntra.com", "@myntra", "myntra"],
-      nykaa: ["nykaa.com", "@nykaa", "nykaa"],
+      blinkit: ["blinkit.com", "@blinkit", "blinkit"],
     };
 
     // Check each platform
@@ -213,7 +217,7 @@ class ParserFactory {
   }
 
   /**
-   * Get all available platforms (e-commerce only)
+   * Get all available platforms
    */
   getAvailablePlatforms() {
     return Object.keys(this.parsers);

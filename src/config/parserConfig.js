@@ -1,11 +1,11 @@
-// src/config/parserConfig.js - UPDATED: Removed quick delivery apps
+// src/config/parserConfig.js
 
 const fs = require("fs");
 const path = require("path");
 
 /**
  * Auto-generate parser configuration based on discovered parsers
- * Updated to exclude quick delivery platforms (Swiggy, Blinkit, Zepto)
+ * This eliminates the need to manually maintain platform lists
  */
 class ParserConfig {
   constructor() {
@@ -14,7 +14,7 @@ class ParserConfig {
   }
 
   /**
-   * Auto-generate configuration from parser files (excluding quick delivery)
+   * Auto-generate configuration from parser files
    */
   generateConfig() {
     const config = {
@@ -27,19 +27,11 @@ class ParserConfig {
     try {
       const files = fs.readdirSync(this.parsersDir);
 
-      // Exclude quick delivery app parsers
-      const excludedParsers = [
-        "swiggyParser.js",
-        "blinkitParser.js",
-        "zetpoParser.js",
-      ];
-
       files.forEach((file) => {
         if (
           file === "index.js" ||
           file === "baseParser.js" ||
-          !file.endsWith(".js") ||
-          excludedParsers.includes(file)
+          !file.endsWith(".js")
         ) {
           return;
         }
@@ -48,12 +40,6 @@ class ParserConfig {
         if (!platformMatch) return;
 
         const platform = platformMatch[1].toLowerCase();
-
-        // Skip quick delivery platforms
-        if (["swiggy", "blinkit", "zepto"].includes(platform)) {
-          console.log(`⏭️ Skipping quick delivery platform: ${platform}`);
-          return;
-        }
 
         // Add to platforms list
         config.platforms.push(platform);
@@ -76,7 +62,7 @@ class ParserConfig {
       });
 
       console.log(
-        `📧 Auto-generated config for ${config.platforms.length} e-commerce platforms (excluded quick delivery)`
+        `🔧 Auto-generated config for ${config.platforms.length} platforms`
       );
     } catch (error) {
       console.error("❌ Error generating parser config:", error.message);
@@ -86,7 +72,7 @@ class ParserConfig {
   }
 
   /**
-   * Generate default configuration for a platform (e-commerce focused)
+   * Generate default configuration for a platform
    */
   generatePlatformConfig(platform) {
     const configs = {
@@ -113,7 +99,7 @@ class ParserConfig {
       },
       flipkart: {
         displayName: "Flipkart",
-        senderPatterns: ["flipkart.com", "nct.flipkart.com"],
+        senderPatterns: ["flipkart.com"],
         subjectPatterns: [
           "your order",
           "order confirmation",
@@ -128,19 +114,49 @@ class ParserConfig {
           confirmed: ["confirmed", "order placed"],
         },
       },
+      swiggy: {
+        displayName: "Swiggy",
+        senderPatterns: ["swiggy.in", "@swiggy", "noreply@swiggy"],
+        subjectPatterns: [
+          "instamart order",
+          "instamart",
+          "swiggy",
+          "delivered",
+        ],
+        orderIdPatterns: [/order id[:\s]*(\d{12,20})/i],
+        amountPatterns: [/Grand Total[:\s]*₹\s*([\d,]+(?:\.\d+)?)/i],
+        statusKeywords: {
+          delivered: ["delivered", "successfully delivered"],
+          shipped: ["dispatched", "shipped"],
+          confirmed: ["order placed", "confirmed"],
+        },
+      },
       myntra: {
         displayName: "Myntra",
         senderPatterns: ["myntra.com", "@myntra"],
-        subjectPatterns: [
-          "order confirmation",
-          "order placed",
-          "myntra",
-          "shipped",
-          "delivered",
-        ],
+        subjectPatterns: ["order confirmation", "order placed", "myntra"],
         orderIdPatterns: [/order\s*(?:id|number|#)\s*[:\-]?\s*([A-Z0-9\-]+)/i],
         amountPatterns: [
           /(?:total|amount|paid)\s*[:\-]?\s*₹?\s*(\d+(?:,\d+)*(?:\.\d{2})?)/i,
+        ],
+        statusKeywords: {
+          delivered: ["delivered", "successfully delivered"],
+          shipped: ["shipped", "dispatched"],
+          confirmed: ["confirmed", "order placed"],
+        },
+      },
+      blinkit: {
+        displayName: "Blinkit",
+        senderPatterns: ["blinkit.com", "@blinkit", "noreply@blinkit"],
+        subjectPatterns: [
+          "order confirmed",
+          "order placed",
+          "your order",
+          "order delivered",
+        ],
+        orderIdPatterns: [/order\s*(?:id|number|#)\s*[:\-]?\s*([A-Z0-9\-]+)/i],
+        amountPatterns: [
+          /(?:total|amount|paid|grand total)\s*[:\-]?\s*₹?\s*(\d+(?:,\d+)*(?:\.\d{2})?)/i,
         ],
         statusKeywords: {
           delivered: ["delivered", "successfully delivered"],
@@ -173,59 +189,19 @@ class ParserConfig {
           confirmed: ["confirmed", "order placed"],
         },
       },
-      ajio: {
-        displayName: "Ajio",
-        senderPatterns: ["ajio.com", "@ajio", "noreply@ajio"],
+      zepto: {
+        displayName: "Zepto",
+        senderPatterns: ["zepto.in", "@zepto", "noreply@zepto", "orders@zepto"],
         subjectPatterns: [
-          "order confirmation",
+          "order confirmed",
           "order placed",
           "your order",
-          "shipped",
-          "delivered",
+          "order delivered",
+          "10 minute delivery",
         ],
         orderIdPatterns: [/order\s*(?:id|number|#)\s*[:\-]?\s*([A-Z0-9\-]+)/i],
         amountPatterns: [
           /(?:total|amount|paid|grand total|order total)\s*[:\-]?\s*₹?\s*(\d+(?:,\d+)*(?:\.\d{2})?)/i,
-        ],
-        statusKeywords: {
-          delivered: ["delivered", "successfully delivered"],
-          shipped: ["shipped", "dispatched"],
-          confirmed: ["confirmed", "order placed"],
-        },
-      },
-      meesho: {
-        displayName: "Meesho",
-        senderPatterns: ["meesho.com", "@meesho", "noreply@meesho"],
-        subjectPatterns: [
-          "order confirmation",
-          "order placed",
-          "your order",
-          "shipped",
-          "delivered",
-        ],
-        orderIdPatterns: [/order\s*(?:id|number|#)\s*[:\-]?\s*([A-Z0-9\-]+)/i],
-        amountPatterns: [
-          /(?:total|amount|paid|grand total|order total)\s*[:\-]?\s*₹?\s*(\d+(?:,\d+)*(?:\.\d{2})?)/i,
-        ],
-        statusKeywords: {
-          delivered: ["delivered", "successfully delivered"],
-          shipped: ["shipped", "dispatched"],
-          confirmed: ["confirmed", "order placed"],
-        },
-      },
-      bigbasket: {
-        displayName: "BigBasket",
-        senderPatterns: ["bigbasket.com", "@bigbasket", "noreply@bigbasket"],
-        subjectPatterns: [
-          "order confirmation",
-          "order placed",
-          "your order",
-          "shipped",
-          "delivered",
-        ],
-        orderIdPatterns: [/order\s*(?:id|number|#)\s*[:\-]?\s*([A-Z0-9\-]+)/i],
-        amountPatterns: [
-          /(?:total|amount|paid|grand total|order total|bill amount)\s*[:\-]?\s*₹?\s*(\d+(?:,\d+)*(?:\.\d{2})?)/i,
         ],
         statusKeywords: {
           delivered: ["delivered", "successfully delivered"],
@@ -253,7 +229,7 @@ class ParserConfig {
       configs[platform] || {
         displayName: platform.charAt(0).toUpperCase() + platform.slice(1),
         senderPatterns: [`${platform}.com`, `@${platform}`],
-        subjectPatterns: ["order", "confirmation", "shipped", "delivered"],
+        subjectPatterns: ["order", "confirmation"],
         orderIdPatterns: [/order\s*[:\-]?\s*([A-Z0-9\-]+)/i],
         amountPatterns: [
           /(?:total|amount)\s*[:\-]?\s*₹?\s*(\d+(?:,\d+)*(?:\.\d{2})?)/i,
@@ -293,25 +269,16 @@ class ParserConfig {
   }
 
   /**
-   * Get all supported platforms (e-commerce only)
+   * Get all supported platforms
    */
   getSupportedPlatforms() {
-    return this.config.platforms.filter(
-      (platform) => !["swiggy", "blinkit", "zepto"].includes(platform)
-    );
+    return this.config.platforms;
   }
 
   /**
    * Get configuration for a specific platform
    */
   getPlatformConfig(platform) {
-    // Block quick delivery platforms
-    if (["swiggy", "blinkit", "zepto"].includes(platform.toLowerCase())) {
-      console.log(
-        `⚠️ Platform ${platform} not supported (quick delivery app excluded)`
-      );
-      return null;
-    }
     return this.config.platformConfigs[platform.toLowerCase()];
   }
 
@@ -319,9 +286,6 @@ class ParserConfig {
    * Get email patterns for a platform
    */
   getEmailPatterns(platform) {
-    if (["swiggy", "blinkit", "zepto"].includes(platform.toLowerCase())) {
-      return null;
-    }
     return this.config.emailPatterns[platform.toLowerCase()];
   }
 
@@ -329,9 +293,6 @@ class ParserConfig {
    * Get search queries for a platform
    */
   getSearchQueries(platform) {
-    if (["swiggy", "blinkit", "zepto"].includes(platform.toLowerCase())) {
-      return null;
-    }
     return this.config.searchQueries[platform.toLowerCase()];
   }
 
@@ -344,15 +305,10 @@ class ParserConfig {
   }
 
   /**
-   * Get full configuration (filtered for e-commerce only)
+   * Get full configuration
    */
   getConfig() {
-    return {
-      ...this.config,
-      platforms: this.config.platforms.filter(
-        (platform) => !["swiggy", "blinkit", "zepto"].includes(platform)
-      ),
-    };
+    return this.config;
   }
 }
 

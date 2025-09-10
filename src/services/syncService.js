@@ -1,4 +1,4 @@
-// src/services/syncService.js - FINAL VERSION WITH DELIVERY PRIORITY AND CLEAN LOGGING
+// src/services/syncService.js - ENHANCED WITH CHRONOLOGICAL PROCESSING & SMART UPDATES
 
 const GmailService = require("./gmailService");
 const { parserFactory } = require("./parsers");
@@ -7,7 +7,6 @@ const { User, Order, OrderItem, EmailSync } = require("../models");
 const logger = require("../utils/logger");
 const emailConfig = require("../config/emailConfig");
 const { ensureFreshGoogleToken } = require("../utils/googleToken");
-const { Op } = require("sequelize");
 
 class SyncService {
   constructor() {
@@ -37,10 +36,13 @@ class SyncService {
       const maxResults =
         options.maxResults || emailConfig.maxEmailsPerSync || 50;
 
-      console.log("🚀 Starting enhanced sync with delivery priority...");
-      console.log(
-        `📊 Parameters: ${daysToFetch} days, max ${maxResults} emails`
-      );
+      console.log("📋 ENHANCED SYNC SERVICE PARAMETERS:");
+      console.log("=".repeat(60));
+      console.log("👤 User:", user.email);
+      console.log("📅 Days to fetch:", daysToFetch);
+      console.log("📧 Max results:", maxResults);
+      console.log("🔄 Processing strategy: CHRONOLOGICAL with smart updates");
+      console.log("=".repeat(60));
 
       syncRecord = await EmailSync.create({
         user_id: userId,
@@ -48,14 +50,14 @@ class SyncService {
         started_at: new Date(),
         metadata: {
           options,
-          strategy: "delivery_priority_with_enhanced_parsing",
+          strategy: "chronological_with_smart_updates",
           resolvedParameters: { daysToFetch, maxResults },
         },
       });
 
       const syncId = syncRecord.id;
       logger.info(
-        `Starting enhanced sync for user ${user.email} (ID: ${syncId})`
+        `Starting enhanced chronological sync for user ${user.email} with sync ID: ${syncId}`
       );
 
       await this.gmailService.initializeClient(
@@ -64,6 +66,7 @@ class SyncService {
       );
 
       // Step 1: Get emails from Gmail
+      console.log(`🔍 Searching emails from last ${daysToFetch} days...`);
       const emails = await this.gmailService.getEmailsFromDateRange(
         daysToFetch,
         maxResults
@@ -81,14 +84,27 @@ class SyncService {
       console.log(`📥 Fetching details for ${emails.length} emails...`);
       const emailDetails = await this.gmailService.getEmailDetails(emails);
 
-      // Step 3: 🎯 DELIVERY PRIORITY PROCESSING
-      const processResult = await this.processEmailsWithDeliveryPriority(
-        emailDetails,
+      // Step 3: 📅 CHRONOLOGICAL PROCESSING (oldest first)
+      console.log(
+        `\n🕒 CHRONOLOGICAL PROCESSING: Sorting ${emailDetails.length} emails by date...`
+      );
+      const chronologicalEmails = this.sortEmailsChronologically(emailDetails);
+
+      console.log(
+        `📅 Date range: ${this.getEmailDateRange(chronologicalEmails)}`
+      );
+      console.log(
+        `🔄 Processing strategy: Process oldest emails first for proper order lifecycle`
+      );
+
+      // Step 4: Process emails chronologically with smart update logic
+      const processResult = await this.processEmailsChronologically(
+        chronologicalEmails,
         userId,
         syncId
       );
 
-      // Step 4: Complete sync
+      // Step 5: Update sync record and return results
       return await this.completeSyncWithResults(
         syncRecord,
         processResult,
@@ -115,12 +131,70 @@ class SyncService {
   }
 
   /**
-   * 🎯 DELIVERY PRIORITY PROCESSING: Process emails by type priority
+   * 📅 Sort emails chronologically (oldest first) for proper order lifecycle processing
    */
-  async processEmailsWithDeliveryPriority(emailDetails, userId, syncId) {
+  sortEmailsChronologically(emailDetails) {
+    console.log(`🕒 Sorting emails chronologically...`);
+
+    const sorted = emailDetails.sort((a, b) => {
+      // Primary sort: by internal date (oldest first)
+      const dateA = parseInt(a.internalDate || 0);
+      const dateB = parseInt(b.internalDate || 0);
+
+      if (dateA !== dateB) {
+        return dateA - dateB; // Ascending (oldest first)
+      }
+
+      // Secondary sort: by email type priority (confirmations first)
+      const priorityA = this.getEmailTypePriority(a.headers.subject || "");
+      const priorityB = this.getEmailTypePriority(b.headers.subject || "");
+
+      return priorityA - priorityB;
+    });
+
+    console.log(`✅ Emails sorted chronologically (${sorted.length} emails)`);
+    console.log(`📅 Oldest: ${this.formatEmailDate(sorted[0])}`);
     console.log(
-      `\n🎯 Processing ${emailDetails.length} emails with delivery priority...`
+      `📅 Newest: ${this.formatEmailDate(sorted[sorted.length - 1])}`
     );
+
+    return sorted;
+  }
+
+  /**
+   * Get email type priority for secondary sorting (confirmations first)
+   */
+  getEmailTypePriority(subject) {
+    const subjectLower = subject.toLowerCase();
+
+    if (
+      subjectLower.includes("confirmation") ||
+      subjectLower.includes("placed") ||
+      subjectLower.includes("thank you")
+    ) {
+      return 1; // Highest priority - order confirmations
+    }
+    if (
+      subjectLower.includes("shipped") ||
+      subjectLower.includes("dispatched")
+    ) {
+      return 2; // Medium priority - shipping updates
+    }
+    if (subjectLower.includes("delivered")) {
+      return 3; // Lower priority - delivery confirmations
+    }
+
+    return 4; // Lowest priority - other updates
+  }
+
+  /**
+   * 🔄 Process emails chronologically with smart update logic
+   */
+  async processEmailsChronologically(chronologicalEmails, userId, syncId) {
+    console.log(
+      `\n🔄 CHRONOLOGICAL PROCESSING: ${chronologicalEmails.length} emails`
+    );
+    console.log(`📋 Strategy: Process oldest→newest, smart update detection`);
 
     const results = {
       ordersCreated: 0,
@@ -131,1568 +205,115 @@ class SyncService {
       processedOrders: [],
       skippedEmails: [],
       errorEmails: [],
-      totalLinksFound: 0,
-      platformStats: {},
-      deliveryUpdatesApplied: 0,
     };
 
-    // Step 1: Parse and categorize emails
-    const categorizedEmails = await this.parseAndCategorizeEmails(emailDetails);
+    // Track processed orders by platform-orderId for update detection
+    const orderTracker = new Map(); // "platform-orderId" → orderRecord
 
-    console.log(`📊 Email categories:`);
-    console.log(
-      `   📋 Confirmations: ${categorizedEmails.orderConfirmations.length}`
-    );
-    console.log(
-      `   📦 Shipping: ${categorizedEmails.shippingNotifications.length}`
-    );
-    console.log(
-      `   🏠 Delivery: ${categorizedEmails.deliveryNotifications.length}`
-    );
-    console.log(`   📧 Other: ${categorizedEmails.otherNotifications.length}`);
+    for (let i = 0; i < chronologicalEmails.length; i++) {
+      const email = chronologicalEmails[i];
+      const emailIndex = i + 1;
 
-    results.emailsProcessed = emailDetails.length;
-    results.parsingErrors = categorizedEmails.parsingErrors;
-
-    // Step 2: Process order confirmations (create new orders)
-    if (categorizedEmails.orderConfirmations.length > 0) {
       console.log(
-        `\n📋 Processing ${categorizedEmails.orderConfirmations.length} order confirmations...`
+        `\n--- 📧 Processing Email ${emailIndex}/${chronologicalEmails.length} ---`
       );
-      const confirmationResult = await this.processOrderEmailsByPriority(
-        categorizedEmails.orderConfirmations,
-        userId,
-        syncId
-      );
-      this.mergeResults(results, confirmationResult);
-    }
-
-    // Step 3: Process shipping notifications (create/update orders)
-    if (categorizedEmails.shippingNotifications.length > 0) {
-      console.log(
-        `\n📦 Processing ${categorizedEmails.shippingNotifications.length} shipping notifications...`
-      );
-      const shippingResult = await this.processOrderEmailsByPriority(
-        categorizedEmails.shippingNotifications,
-        userId,
-        syncId
-      );
-      this.mergeResults(results, shippingResult);
-    }
-
-    // Step 4: Process other notifications
-    if (categorizedEmails.otherNotifications.length > 0) {
-      console.log(
-        `\n📧 Processing ${categorizedEmails.otherNotifications.length} other notifications...`
-      );
-      const otherResult = await this.processOrderEmailsByPriority(
-        categorizedEmails.otherNotifications,
-        userId,
-        syncId
-      );
-      this.mergeResults(results, otherResult);
-    }
-
-    // Step 5: 🏠 Process delivery notifications LAST (status updates only)
-    if (categorizedEmails.deliveryNotifications.length > 0) {
-      console.log(
-        `\n🏠 Processing ${categorizedEmails.deliveryNotifications.length} delivery notifications...`
-      );
-      const deliveryResult = await this.processDeliveryNotificationsOnly(
-        categorizedEmails.deliveryNotifications,
-        userId,
-        syncId
-      );
-      this.mergeResults(results, deliveryResult);
-      results.deliveryUpdatesApplied =
-        deliveryResult.deliveryUpdatesApplied || 0;
-    }
-
-    console.log(
-      `\n✅ Processing complete: ${results.ordersCreated} created, ${results.ordersUpdated} updated, ${results.deliveryUpdatesApplied} delivery updates`
-    );
-
-    return results;
-  }
-
-  /**
-   * 📧 Parse and categorize emails by type
-   */
-  async parseAndCategorizeEmails(emailDetails) {
-    const categorized = {
-      orderConfirmations: [],
-      shippingNotifications: [],
-      deliveryNotifications: [],
-      otherNotifications: [],
-      parsingErrors: 0,
-    };
-
-    for (let i = 0; i < emailDetails.length; i++) {
-      const email = emailDetails[i];
+      console.log(`📅 Date: ${this.formatEmailDate(email)}`);
+      console.log(`📨 From: ${email.headers.from}`);
+      console.log(`📋 Subject: ${email.headers.subject}`);
 
       try {
+        // Step 1: Parse email content
         const parsedData = this.parseEmailWithValidation(email);
 
-        if (parsedData) {
-          const emailWithMetadata = {
-            ...parsedData,
-            originalEmail: email,
-            emailIndex: i + 1,
-            emailTimestamp: parseInt(email.internalDate || 0),
-          };
-
-          switch (parsedData.emailType) {
-            case "order_confirmation":
-              categorized.orderConfirmations.push(emailWithMetadata);
-              break;
-            case "shipping_notification":
-              categorized.shippingNotifications.push(emailWithMetadata);
-              break;
-            case "delivery_notification":
-            case "out_for_delivery":
-              categorized.deliveryNotifications.push(emailWithMetadata);
-              break;
-            default:
-              categorized.otherNotifications.push(emailWithMetadata);
-              break;
-          }
-        } else {
-          categorized.parsingErrors++;
+        if (!parsedData) {
+          console.log(
+            "⚠️ Parser returned null - email not recognized as order"
+          );
+          results.skippedEmails.push({
+            reason: "not_parseable",
+            from: email.headers.from,
+            subject: email.headers.subject,
+          });
+          results.ordersSkipped++;
+          continue;
         }
-      } catch (error) {
-        categorized.parsingErrors++;
-      }
-    }
 
-    return categorized;
-  }
-
-  /**
-   * 🏠 Process delivery notifications: Update existing orders only
-   */
-  async processDeliveryNotificationsOnly(deliveryEmails, userId, syncId) {
-    const results = {
-      ordersUpdated: 0,
-      ordersSkipped: 0,
-      deliveryUpdatesApplied: 0,
-      processedOrders: [],
-      skippedEmails: [],
-      errorEmails: [],
-    };
-
-    for (const deliveryEmail of deliveryEmails) {
-      const orderId = deliveryEmail.orderId;
-
-      try {
-        // Find existing order
-        const existingOrder = await this.findExistingOrderForDelivery(
-          userId,
-          deliveryEmail.platform,
-          deliveryEmail
+        console.log(
+          `✅ Parsed as ${parsedData.platform} order: ${parsedData.orderId}`
+        );
+        console.log(
+          `📊 Status: ${parsedData.status}, Amount: ₹${
+            parsedData.amount || "N/A"
+          }`
         );
 
-        if (existingOrder) {
-          // Update delivery status
-          const shouldUpdate = this.shouldUpdateDeliveryStatus(
-            existingOrder.status,
-            deliveryEmail.status
-          );
+        // Step 2: Determine if this is new order or update
+        const orderKey = `${parsedData.platform}-${parsedData.orderId}`;
+        const existingOrderInSync = orderTracker.get(orderKey);
+        const existingOrderInDB = await this.findExistingOrder(
+          userId,
+          parsedData.platform,
+          parsedData.orderId
+        );
 
-          if (shouldUpdate) {
-            const updates = {
-              status: deliveryEmail.status,
-              delivered_date: new Date(),
-              last_updated: new Date(),
-              sync_id: syncId,
-            };
+        // Step 3: Process based on email type and existing data
+        const processingResult = await this.processOrderEmail(
+          parsedData,
+          email,
+          existingOrderInSync,
+          existingOrderInDB,
+          userId,
+          syncId,
+          emailIndex
+        );
 
-            // Add tracking if missing
-            if (deliveryEmail.trackingId && !existingOrder.tracking_number) {
-              updates.tracking_number = deliveryEmail.trackingId;
-            }
-
-            await existingOrder.update(updates);
-
-            results.ordersUpdated++;
-            results.deliveryUpdatesApplied++;
-            results.processedOrders.push(await existingOrder.reload());
-          } else {
-            results.ordersSkipped++;
-          }
+        if (processingResult.action === "created") {
+          results.ordersCreated++;
+          orderTracker.set(orderKey, processingResult.order);
+          results.processedOrders.push(processingResult.order);
+        } else if (processingResult.action === "updated") {
+          results.ordersUpdated++;
+          orderTracker.set(orderKey, processingResult.order);
+          results.processedOrders.push(processingResult.order);
         } else {
-          // 🎯 KEY DECISION: Skip delivery notifications without existing orders
-          console.log(
-            `⏭️ Skipping delivery notification for ${orderId} - no existing order`
-          );
-
-          results.skippedEmails.push({
-            orderId: orderId,
-            reason: "delivery_notification_without_existing_order",
-            emailType: deliveryEmail.emailType,
-            decision: "skipped - no product information available",
-          });
-
           results.ordersSkipped++;
+          results.skippedEmails.push({
+            reason: processingResult.reason,
+            from: email.headers.from,
+            subject: email.headers.subject,
+          });
         }
+
+        results.emailsProcessed++;
       } catch (error) {
         console.error(
-          `❌ Error processing delivery notification: ${error.message}`
+          `❌ Error processing email ${emailIndex}:`,
+          error.message
         );
+        results.parsingErrors++;
         results.errorEmails.push({
           error: error.message,
-          orderId: orderId,
-          emailType: deliveryEmail.emailType,
+          from: email.headers.from,
+          subject: email.headers.subject,
         });
       }
     }
 
-    return results;
-  }
-
-  /**
-   * 🔍 Find existing order for delivery notification
-   */
-  async findExistingOrderForDelivery(userId, platform, deliveryEmail) {
-    const searchConditions = [];
-
-    if (deliveryEmail.orderId) {
-      searchConditions.push({ platform_order_id: deliveryEmail.orderId });
-    }
-
-    if (deliveryEmail.trackingId) {
-      searchConditions.push({ tracking_number: deliveryEmail.trackingId });
-    }
-
-    if (deliveryEmail.orderId) {
-      const hash = getOrderHash({
-        platform,
-        orderId: deliveryEmail.orderId,
-        userId,
-      });
-      searchConditions.push({ hash });
-    }
-
-    if (searchConditions.length === 0) return null;
-
-    return await Order.findOne({
-      where: {
-        user_id: userId,
-        platform: platform,
-        [Op.or]: searchConditions,
-      },
-    });
-  }
-
-  /**
-   * 📊 Process order emails by priority (non-delivery emails)
-   */
-  async processOrderEmailsByPriority(emails, userId, syncId) {
-    // Group by platform
-    const platformGroups = this.groupOrdersByPlatform(emails);
-
-    const results = {
-      ordersCreated: 0,
-      ordersUpdated: 0,
-      ordersSkipped: 0,
-      processedOrders: [],
-      skippedEmails: [],
-      errorEmails: [],
-    };
-
-    // Process each platform
-    for (const [platform, platformOrders] of Object.entries(platformGroups)) {
-      if (platformOrders.length === 0) continue;
-
-      // Link orders for this platform
-      const linkedOrders = await this.linkOrdersForPlatformFixed(
-        platform,
-        platformOrders
-      );
-
-      // Process linked orders
-      const platformResult =
-        await this.processLinkedOrdersWithFixedLifecycleProtection(
-          linkedOrders,
-          platform,
-          userId,
-          syncId
-        );
-
-      this.mergeResults(results, platformResult);
-    }
+    console.log(`\n📊 CHRONOLOGICAL PROCESSING COMPLETE:`);
+    console.log(`✅ Orders created: ${results.ordersCreated}`);
+    console.log(`🔄 Orders updated: ${results.ordersUpdated}`);
+    console.log(`⏭️ Orders skipped: ${results.ordersSkipped}`);
+    console.log(`❌ Parsing errors: ${results.parsingErrors}`);
 
     return results;
   }
 
   /**
-   * 🪙 Group parsed orders by platform
+   * Parse email with comprehensive validation and garbage filtering
    */
-  groupOrdersByPlatform(parsedOrders) {
-    const groups = {};
-    for (const order of parsedOrders) {
-      const platform = order.platform || "generic";
-      if (!groups[platform]) groups[platform] = [];
-      groups[platform].push(order);
-    }
-    return groups;
-  }
-
-  /**
-   * 🔗 Link orders for platform with enhanced logic
-   */
-  async linkOrdersForPlatformFixed(platform, platformOrders) {
-    if (platformOrders.length === 0) return [];
-
-    // For Myntra, use enhanced linking
-    if (platform === "myntra") {
-      return await this.linkMyntraOrdersRobustly(platformOrders);
-    }
-
-    // For other platforms, use fixed standard linking
-    return await this.linkOrdersFixedStandard(platform, platformOrders);
-  }
-
-  /**
-   * 🔗 Fixed standard linking with proper key generation
-   */
-  async linkOrdersFixedStandard(platform, platformOrders) {
-    if (platformOrders.length === 0) return [];
-
-    // Group orders by fixed order key
-    const orderGroups = new Map();
-
-    for (const order of platformOrders) {
-      const orderKey = this.generateFixedOrderKey(order, platform);
-      if (!orderGroups.has(orderKey)) {
-        orderGroups.set(orderKey, []);
-      }
-      orderGroups.get(orderKey).push(order);
-    }
-
-    // Process each group
-    const linkedOrders = [];
-
-    for (const [orderKey, orderGroup] of orderGroups) {
-      if (orderGroup.length === 1) {
-        linkedOrders.push(orderGroup[0]);
-      } else {
-        const linkedOrder = this.createFixedUniversalLinkedOrder(
-          orderGroup,
-          platform
-        );
-        linkedOrders.push(linkedOrder);
-      }
-    }
-
-    return linkedOrders;
-  }
-
-  /**
-   * 🔑 Generate fixed order key that prevents wrong grouping
-   */
-  generateFixedOrderKey(order, platform) {
-    // 🎯 PRIMARY: Use order ID as unique identifier
-    if (order.orderId) {
-      return `${platform}_orderid_${order.orderId}`;
-    }
-
-    // 🎯 SECONDARY: Use tracking ID if no order ID
-    if (order.trackingId) {
-      return `${platform}_tracking_${order.trackingId}`;
-    }
-
-    // 🎯 FALLBACK: Product-based key only when no IDs available
-    const identifiers = [platform];
-
-    const productName = order.products?.[0]?.name || "unknown";
-    const normalizedProduct = this.cleanProductNameForKey(productName);
-    identifiers.push(normalizedProduct);
-
-    const amount = order.amount ? Math.round(order.amount) : 0;
-    identifiers.push(amount.toString());
-
-    const addressId = this.getFlexibleAddressId(order);
-    identifiers.push(addressId);
-
-    const orderDate = order.orderDate || new Date();
-    const dayKey = orderDate.toISOString().split("T")[0].replace(/-/g, "");
-    identifiers.push(dayKey);
-
-    return identifiers.join("_");
-  }
-
-  /**
-   * 🔗 Create fixed universal linked order
-   */
-  createFixedUniversalLinkedOrder(orderGroup, platform) {
-    // For Myntra, use specific method
-    if (platform === "myntra") {
-      return this.createMyntraLinkedOrder(orderGroup);
-    }
-
-    // Sort emails by lifecycle stage
-    const sortedOrders = this.sortOrdersByLifecycleStage(orderGroup);
-
-    // Build timeline
-    const orderTimeline = this.buildOrderTimeline(sortedOrders);
-
-    // Create master order with enhanced data preservation
-    const masterOrder = this.mergeFixedMasterOrderData(sortedOrders, platform);
-
-    // Add lifecycle protection metadata
-    masterOrder.lifecycleProtection = {
-      emailsLinked: orderGroup.length,
-      timeline: orderTimeline,
-      integrityChecks: this.performIntegrityChecks(sortedOrders),
-      linkedAt: new Date().toISOString(),
-      linkingStrategy: "fixed_universal",
-    };
-
-    return masterOrder;
-  }
-
-  /**
-   * 🔗 Merge master order data with enhanced preservation
-   */
-  mergeFixedMasterOrderData(sortedOrders, platform) {
-    // Find the order with best data quality
-    const baseOrder = this.selectBestOrderForMerging(sortedOrders);
-    const masterOrder = { ...baseOrder };
-
-    let bestProductName = baseOrder.products?.[0]?.name;
-    let bestAmount = baseOrder.amount;
-
-    // Merge data from all orders with priority preservation
-    for (const order of sortedOrders) {
-      // Order ID merging
-      if (!masterOrder.orderId && order.orderId) {
-        masterOrder.orderId = order.orderId;
-      }
-
-      // Tracking ID merging
-      if (!masterOrder.trackingId && order.trackingId) {
-        masterOrder.trackingId = order.trackingId;
-      }
-
-      // Amount preservation - prefer non-zero amounts
-      if (
-        (!masterOrder.amount || masterOrder.amount === 0) &&
-        order.amount &&
-        order.amount > 0
-      ) {
-        masterOrder.amount = order.amount;
-        bestAmount = order.amount;
-      }
-
-      // Product name preservation with quality check
-      if (order.products && order.products.length > 0) {
-        const newProductName = order.products[0].name;
-        if (this.isProductNameBetter(bestProductName, newProductName)) {
-          bestProductName = newProductName;
-          masterOrder.products = order.products;
-        }
-      }
-
-      // Status update with lifecycle protection
-      if (this.shouldUpdateStatus(masterOrder.status, order.status)) {
-        masterOrder.status = order.status;
-      }
-
-      // Delivery address
-      if (!masterOrder.deliveryAddress && order.deliveryAddress) {
-        masterOrder.deliveryAddress = order.deliveryAddress;
-      }
-    }
-
-    // Final data preservation
-    if (bestProductName && masterOrder.products) {
-      masterOrder.products[0].name = bestProductName;
-      if (bestAmount && bestAmount > 0 && masterOrder.products.length === 1) {
-        masterOrder.products[0].price = bestAmount;
-        masterOrder.products[0].formattedPrice = `₹${bestAmount}`;
-      }
-    }
-
-    if (bestAmount && bestAmount > 0) {
-      masterOrder.amount = bestAmount;
-      masterOrder.formattedAmount = `₹${bestAmount}`;
-    }
-
-    // Add linking metadata
-    masterOrder.isLinkedOrder = sortedOrders.length > 1;
-    masterOrder.linkedEmailCount = sortedOrders.length;
-    masterOrder.linkedEmails = sortedOrders.map((order) => ({
-      emailIndex: order.emailIndex,
-      emailType: order.emailType,
-      status: order.status,
-      orderId: order.orderId,
-      trackingId: order.trackingId,
-      subject: order.originalEmail.headers.subject,
-      timestamp: order.emailTimestamp,
-      productName: order.products?.[0]?.name,
-      amount: order.amount,
-    }));
-
-    masterOrder.confidence = Math.min(
-      (masterOrder.confidence || 0.7) + sortedOrders.length * 0.05,
-      0.95
-    );
-
-    return masterOrder;
-  }
-
-  /**
-   * 🛡️ Process linked orders with enhanced lifecycle protection
-   */
-  async processLinkedOrdersWithFixedLifecycleProtection(
-    linkedOrders,
-    platform,
-    userId,
-    syncId
-  ) {
-    const results = {
-      ordersCreated: 0,
-      ordersUpdated: 0,
-      ordersSkipped: 0,
-      processedOrders: [],
-      skippedEmails: [],
-      errorEmails: [],
-    };
-
-    for (const linkedOrder of linkedOrders) {
-      try {
-        // Find existing order
-        const existingOrder = await this.findExistingOrderUniversal(
-          userId,
-          platform,
-          linkedOrder
-        );
-
-        if (existingOrder) {
-          const updatedOrder =
-            await this.updateExistingOrderWithFixedLifecycleProtection(
-              existingOrder,
-              linkedOrder,
-              syncId
-            );
-          results.ordersUpdated++;
-          results.processedOrders.push(updatedOrder);
-        } else {
-          const newOrder = await this.createNewFixedLinkedOrder(
-            linkedOrder,
-            userId,
-            syncId
-          );
-          results.ordersCreated++;
-          results.processedOrders.push(newOrder);
-        }
-      } catch (error) {
-        console.error(`❌ Error processing linked order: ${error.message}`);
-        results.errorEmails.push({
-          error: error.message,
-          platform,
-          orderData: {
-            orderId: linkedOrder.orderId,
-            trackingId: linkedOrder.trackingId,
-          },
-        });
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * ✅ Create new fixed linked order
-   */
-  async createNewFixedLinkedOrder(linkedOrderData, userId, syncId) {
-    const finalProductName = this.getFixedCleanProductName(linkedOrderData);
-    const finalAmount = linkedOrderData.amount || 0;
-
-    const orderData = {
-      user_id: userId,
-      platform: linkedOrderData.platform,
-      order_id: linkedOrderData.orderId || linkedOrderData.trackingId,
-      platform_order_id: linkedOrderData.orderId || linkedOrderData.trackingId,
-      product_name: finalProductName,
-      total_amount: finalAmount,
-      currency: "INR",
-      order_date: linkedOrderData.orderDate || new Date(),
-      status: linkedOrderData.status || "ordered",
-      tracking_number: linkedOrderData.trackingId || null,
-      delivered_date:
-        linkedOrderData.status === "delivered" ? new Date() : null,
-      email_message_id: linkedOrderData.originalEmail?.messageId,
-      raw_email_data: JSON.stringify({
-        linkedEmails: linkedOrderData.linkedEmails,
-        isLinkedOrder: linkedOrderData.isLinkedOrder,
-        lifecycleProtection: linkedOrderData.lifecycleProtection,
-        originalParsedData: {
-          productName: finalProductName,
-          amount: finalAmount,
-          extractionMetadata: linkedOrderData.extractionMetadata,
-        },
-      }),
-      parsed_data: linkedOrderData,
-      confidence_score: linkedOrderData.confidence || 0.8,
-      sync_id: syncId,
-      last_updated: new Date(),
-      hash: getOrderHash({
-        platform: linkedOrderData.platform,
-        orderId: linkedOrderData.orderId || linkedOrderData.trackingId,
-        userId,
-      }),
-    };
-
-    const order = await Order.create(orderData);
-
-    // Create order items with preserved pricing
-    if (linkedOrderData.products && linkedOrderData.products.length > 0) {
-      await this.createOrderItemsFixed(
-        order.id,
-        linkedOrderData.products,
-        finalAmount
-      );
-    }
-
-    return order;
-  }
-
-  /**
-   * 📄 Update existing order with enhanced preservation
-   */
-  async updateExistingOrderWithFixedLifecycleProtection(
-    existingOrder,
-    linkedOrder,
-    syncId
-  ) {
-    const updates = {};
-    const changes = [];
-
-    // Product name updates
-    if (linkedOrder.products && linkedOrder.products.length > 0) {
-      const newProductName = linkedOrder.products[0].name;
-      if (
-        this.isProductNameBetter(existingOrder.product_name, newProductName)
-      ) {
-        updates.product_name = newProductName;
-        changes.push(`product: "${newProductName?.substring(0, 30)}"`);
-      }
-    }
-
-    // Amount updates
-    if (linkedOrder.amount && linkedOrder.amount > 0) {
-      if (!existingOrder.total_amount || existingOrder.total_amount === 0) {
-        updates.total_amount = linkedOrder.amount;
-        changes.push(`amount: ₹${linkedOrder.amount}`);
-      }
-    }
-
-    // Order ID updates
-    if (!existingOrder.platform_order_id && linkedOrder.orderId) {
-      updates.platform_order_id = linkedOrder.orderId;
-      updates.order_id = linkedOrder.orderId;
-      changes.push(`order_id: ${linkedOrder.orderId}`);
-    }
-
-    // Tracking updates
-    if (linkedOrder.trackingId && !existingOrder.tracking_number) {
-      updates.tracking_number = linkedOrder.trackingId;
-      changes.push(`tracking: ${linkedOrder.trackingId}`);
-    }
-
-    // Status updates
-    if (this.shouldUpdateStatus(existingOrder.status, linkedOrder.status)) {
-      updates.status = linkedOrder.status;
-      changes.push(`status: ${existingOrder.status} → ${linkedOrder.status}`);
-
-      if (linkedOrder.status === "delivered" && !existingOrder.delivered_date) {
-        updates.delivered_date = new Date();
-        changes.push("delivery_date: added");
-      }
-    }
-
-    // Update metadata
-    updates.sync_id = syncId;
-    updates.last_updated = new Date();
-    updates.parsed_data = {
-      ...(existingOrder.parsed_data || {}),
-      linkedOrderData: linkedOrder,
-      lifecycleProtection: linkedOrder.lifecycleProtection,
-    };
-
-    if (changes.length > 0) {
-      await existingOrder.update(updates);
-      return await existingOrder.reload();
-    }
-
-    return existingOrder;
-  }
-
-  /**
-   * 🔧 Get clean product name with enhanced fallback
-   */
-  getFixedCleanProductName(parsedData) {
-    // Priority 1: Use products array with quality check
-    if (parsedData.products && parsedData.products.length > 0) {
-      for (const product of parsedData.products) {
-        const productName = product.name;
-
-        if (
-          productName &&
-          productName !== "Data not available in email" &&
-          productName.length > 3 &&
-          !this.isGarbageProductName(productName) &&
-          !productName.includes("Amazon Order") &&
-          !productName.includes("Delivered Item") &&
-          !productName.includes("Out for Delivery")
-        ) {
-          return productName.length > 100
-            ? productName.substring(0, 100) + "..."
-            : productName;
-        }
-      }
-    }
-
-    // Priority 2: Extract from original email subject
-    if (parsedData.originalEmail?.headers?.subject) {
-      const subjectProduct = this.extractGenericProductFromSubject(
-        parsedData.originalEmail.headers.subject
-      );
-      if (subjectProduct) {
-        return subjectProduct;
-      }
-    }
-
-    // Fallback: Create meaningful name
-    const platform =
-      parsedData.platform.charAt(0).toUpperCase() +
-      parsedData.platform.slice(1);
-    const orderId = parsedData.orderId || parsedData.trackingId || "Unknown";
-
-    if (parsedData.emailType === "delivery_notification") {
-      return `${platform} Delivered Item ${orderId}`;
-    } else if (parsedData.emailType === "shipping_notification") {
-      return `${platform} Shipped Item ${orderId}`;
-    } else {
-      return `${platform} Order ${orderId}`;
-    }
-  }
-
-  /**
-   * 🎯 Select best order for merging based on data quality
-   */
-  selectBestOrderForMerging(orders) {
-    const scoredOrders = orders.map((order) => {
-      let score = 0;
-
-      // Product name quality (highest priority)
-      if (order.products && order.products.length > 0) {
-        const productName = order.products[0].name || "";
-        if (
-          productName &&
-          !productName.startsWith("Amazon Order") &&
-          !productName.includes("Delivered Item") &&
-          !productName.includes("Data not available")
-        ) {
-          score += 50;
-          if (productName.length > 15) score += 10;
-          if (productName.split(" ").length >= 3) score += 10;
-        }
-      }
-
-      // Amount availability
-      if (order.amount && order.amount > 0) {
-        score += 30;
-      }
-
-      // Order ID availability
-      if (order.orderId) {
-        score += 15;
-      }
-
-      // Email type quality
-      if (order.emailType === "order_confirmation") {
-        score += 10;
-      } else if (order.emailType === "shipping_notification") {
-        score += 5;
-      }
-
-      // Confidence score
-      score += (order.confidence || 0) * 10;
-
-      return { order, score };
-    });
-
-    scoredOrders.sort((a, b) => b.score - a.score);
-    return scoredOrders[0].order;
-  }
-
-  /**
-   * 🔧 Check if new product name is better
-   */
-  isProductNameBetter(currentName, newName) {
-    if (!currentName) return !!newName;
-    if (!newName) return false;
-
-    // Current name is placeholder/generic
-    if (
-      currentName.includes("Amazon Order") ||
-      currentName.includes("Delivered Item") ||
-      currentName.includes("Out for Delivery") ||
-      currentName.includes("Flipkart Order") ||
-      currentName.includes("Myntra Order") ||
-      currentName === "Data not available in email"
-    ) {
-      return (
-        !newName.includes("Amazon Order") &&
-        !newName.includes("Delivered Item") &&
-        !newName.includes("Out for Delivery") &&
-        !newName.includes("Flipkart Order") &&
-        !newName.includes("Myntra Order") &&
-        newName !== "Data not available in email"
-      );
-    }
-
-    // New name is placeholder/generic
-    if (
-      newName.includes("Amazon Order") ||
-      newName.includes("Delivered Item") ||
-      newName.includes("Out for Delivery") ||
-      newName.includes("Flipkart Order") ||
-      newName.includes("Myntra Order") ||
-      newName === "Data not available in email"
-    ) {
-      return false;
-    }
-
-    // Both are real names - prefer longer, more descriptive one
-    const currentWords = currentName.split(" ").length;
-    const newWords = newName.split(" ").length;
-
-    return newWords > currentWords && newName.length > currentName.length;
-  }
-
-  /**
-   * 🔧 Create order items with proper pricing
-   */
-  async createOrderItemsFixed(orderId, products, totalAmount = null) {
-    const validItems = products.filter(
-      (item) =>
-        item.name &&
-        item.name !== "Data not available in email" &&
-        item.name.length > 3 &&
-        !this.isGarbageProductName(item.name)
-    );
-
-    if (validItems.length === 0) return;
-
-    const itemsToCreate = validItems.map((item) => {
-      let itemPrice = 0;
-      let itemTotalPrice = 0;
-
-      if (item.price && typeof item.price === "number" && item.price > 0) {
-        itemPrice = item.price;
-        itemTotalPrice = itemPrice * (parseInt(item.quantity) || 1);
-      } else if (totalAmount && totalAmount > 0) {
-        if (validItems.length === 1) {
-          itemPrice = totalAmount;
-          itemTotalPrice = totalAmount;
-        } else {
-          itemPrice = Math.round(totalAmount / validItems.length);
-          itemTotalPrice = itemPrice * (parseInt(item.quantity) || 1);
-        }
-      }
-
-      return {
-        order_id: orderId,
-        name: item.name,
-        description: item.description || null,
-        quantity: parseInt(item.quantity) || 1,
-        unit_price: itemPrice,
-        total_price: itemTotalPrice,
-        image_url: item.image_url || null,
-        product_url: item.product_url || null,
-        sku: item.sku || null,
-        brand: item.brand || null,
-        category: item.category || null,
-        attributes: item.attributes || null,
-      };
-    });
-
-    await OrderItem.bulkCreate(itemsToCreate);
-  }
-
-  /**
-   * 🔍 Find existing order for universal matching
-   */
-  async findExistingOrderUniversal(userId, platform, linkedOrder) {
-    const orConditions = [];
-
-    if (linkedOrder.orderId) {
-      orConditions.push({ platform_order_id: linkedOrder.orderId });
-    }
-
-    if (linkedOrder.trackingId) {
-      orConditions.push({ tracking_number: linkedOrder.trackingId });
-      orConditions.push({ platform_order_id: linkedOrder.trackingId });
-    }
-
-    if (linkedOrder.orderId || linkedOrder.trackingId) {
-      const hash = getOrderHash({
-        platform,
-        orderId: linkedOrder.orderId || linkedOrder.trackingId,
-        userId,
-      });
-      orConditions.push({ hash });
-    }
-
-    if (orConditions.length === 0) return null;
-
-    return await Order.findOne({
-      where: {
-        user_id: userId,
-        platform: platform,
-        [Op.or]: orConditions,
-      },
-    });
-  }
-
-  /**
-   * 🔧 Check if delivery status should be updated
-   */
-  shouldUpdateDeliveryStatus(currentStatus, newStatus) {
-    const statusHierarchy = {
-      ordered: 1,
-      confirmed: 2,
-      processing: 3,
-      shipped: 4,
-      out_for_delivery: 5,
-      delivered: 6,
-    };
-
-    const currentLevel = statusHierarchy[currentStatus] || 1;
-    const newLevel = statusHierarchy[newStatus] || 1;
-
-    return newLevel >= currentLevel;
-  }
-
-  // 🔧 HELPER METHODS
-
-  cleanProductNameForKey(productName) {
-    if (!productName) return "unknown";
-
-    return productName
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#8377;/g, "₹")
-      .replace(/&[a-z]+;/gi, " ")
-      .replace(/[^\w\s]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, "_")
-      .substring(0, 50);
-  }
-
-  getFlexibleAddressId(order) {
-    if (order.deliveryAddress?.pincode) {
-      return order.deliveryAddress.pincode;
-    }
-
-    if (order.deliveryAddress?.city) {
-      return order.deliveryAddress.city.toLowerCase().replace(/\s+/g, "_");
-    }
-
-    return "user_default";
-  }
-
-  extractGenericProductFromSubject(subject) {
-    if (!subject) return null;
-
-    const patterns = [
-      /"([^"]{8,80})"/i,
-      /:\s*([A-Z][a-zA-Z0-9\s\-&.'()]{8,80})(?:\.\.\.|\s+-\s+|$)/i,
-      /containing\s*(.{8,60})/i,
-      /for\s+(.{8,60})\s+has\s+been/i,
-    ];
-
-    for (const pattern of patterns) {
-      const match = subject.match(pattern);
-      if (match) {
-        const productName = match[1].trim();
-        const cleanName = this.cleanProductNameForDisplay(productName);
-
-        if (this.isValidProductNameForDisplay(cleanName)) {
-          return cleanName;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  cleanProductNameForDisplay(name) {
-    if (!name) return "";
-
-    return name
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#8377;/g, "₹")
-      .replace(/&[a-z]+;/gi, " ")
-      .replace(/\s+/g, " ")
-      .replace(/[<>]/g, "")
-      .replace(/^\W+|\W+$/g, "")
-      .replace(/\.{3,}/, "...")
-      .substring(0, 100)
-      .trim();
-  }
-
-  isValidProductNameForDisplay(name) {
-    if (!name || name.length < 3 || name.length > 120) return false;
-
-    const nameLower = name.toLowerCase().trim();
-
-    const rejectPatterns = [
-      /^(amazon|flipkart|myntra|order|delivered|shipped|confirmation|notification|email|package|item|shipment)$/i,
-      /^(your|the|this|that|has|been|was|will|can|may|should|dear|hello|hi|thanks|thank|regarding)$/i,
-      /^\d+$/,
-      /^[\d\s\-\.]+$/,
-      /^[a-f0-9]{8,}$/i,
-      /http|www\.|\.com|\.in|mailto|@/i,
-    ];
-
-    const isRejected = rejectPatterns.some((pattern) =>
-      pattern.test(nameLower)
-    );
-    return !isRejected && /[a-zA-Z]{3,}/.test(name);
-  }
-
-  mergeResults(targetResults, sourceResults) {
-    targetResults.ordersCreated += sourceResults.ordersCreated || 0;
-    targetResults.ordersUpdated += sourceResults.ordersUpdated || 0;
-    targetResults.ordersSkipped += sourceResults.ordersSkipped || 0;
-    targetResults.processedOrders.push(
-      ...(sourceResults.processedOrders || [])
-    );
-    targetResults.skippedEmails.push(...(sourceResults.skippedEmails || []));
-    targetResults.errorEmails.push(...(sourceResults.errorEmails || []));
-
-    if (sourceResults.deliveryUpdatesApplied) {
-      targetResults.deliveryUpdatesApplied =
-        (targetResults.deliveryUpdatesApplied || 0) +
-        sourceResults.deliveryUpdatesApplied;
-    }
-  }
-
-  // 🔧 MYNTRA METHODS (unchanged but with reduced logging)
-
-  async linkMyntraOrdersRobustly(myntraOrders) {
-    const validOrders = myntraOrders.filter(
-      (order) =>
-        order.orderId ||
-        order.trackingId ||
-        (order.products && order.products.length > 0)
-    );
-
-    if (validOrders.length === 0) return [];
-
-    const orderGroups = new Map();
-
-    for (const order of validOrders) {
-      const orderKey = this.generateFixedOrderKey(order, "myntra");
-      if (!orderGroups.has(orderKey)) {
-        orderGroups.set(orderKey, []);
-      }
-      orderGroups.get(orderKey).push(order);
-    }
-
-    const enhancedGroups = this.enhanceMyntraLinkingFlexible(
-      orderGroups,
-      validOrders
-    );
-
-    const linkedOrders = [];
-
-    for (const [orderKey, orderGroup] of enhancedGroups) {
-      if (orderGroup.length === 1) {
-        linkedOrders.push(orderGroup[0]);
-      } else {
-        const linkedOrder = this.createMyntraLinkedOrder(orderGroup);
-        linkedOrders.push(linkedOrder);
-      }
-    }
-
-    return linkedOrders;
-  }
-
-  enhanceMyntraLinkingFlexible(existingGroups, allOrders) {
-    const singleOrderGroups = [];
-    const multiOrderGroups = [];
-
-    for (const [key, group] of existingGroups) {
-      if (group.length === 1) {
-        singleOrderGroups.push({ key, group });
-      } else {
-        multiOrderGroups.push({ key, group });
-      }
-    }
-
-    const newGroups = new Map(existingGroups);
-    const processedKeys = new Set();
-
-    for (let i = 0; i < singleOrderGroups.length; i++) {
-      if (processedKeys.has(singleOrderGroups[i].key)) continue;
-
-      const group1 = singleOrderGroups[i];
-      const order1 = group1.group[0];
-
-      for (let j = i + 1; j < singleOrderGroups.length; j++) {
-        if (processedKeys.has(singleOrderGroups[j].key)) continue;
-
-        const group2 = singleOrderGroups[j];
-        const order2 = group2.group[0];
-
-        if (this.shouldLinkMyntraOrders(order1, order2)) {
-          newGroups.delete(group1.key);
-          newGroups.delete(group2.key);
-          processedKeys.add(group1.key);
-          processedKeys.add(group2.key);
-
-          const combinedKey = `linked_${group1.key.split("_")[1]}_${
-            order1.amount || 0
-          }`;
-          newGroups.set(combinedKey, [order1, order2]);
-          break;
-        }
-      }
-    }
-
-    return newGroups;
-  }
-
-  shouldLinkMyntraOrders(order1, order2) {
-    const productSimilarity = this.calculateProductSimilarity(order1, order2);
-    if (productSimilarity < 85) return false;
-
-    const amount1 = order1.amount || 0;
-    const amount2 = order2.amount || 0;
-    const amountDiff = Math.abs(amount1 - amount2);
-    if (amountDiff > 1) return false;
-
-    const date1 = order1.orderDate || new Date();
-    const date2 = order2.orderDate || new Date();
-    const dateDiff = Math.abs(date1.getTime() - date2.getTime());
-    const oneDayMs = 24 * 60 * 60 * 1000;
-    if (dateDiff > oneDayMs) return false;
-
-    return true;
-  }
-
-  calculateProductSimilarity(order1, order2) {
-    const name1 = this.cleanProductNameForKey(order1.products?.[0]?.name || "");
-    const name2 = this.cleanProductNameForKey(order2.products?.[0]?.name || "");
-
-    if (!name1 || !name2) return 0;
-
-    const words1 = name1.split("_").filter((w) => w.length > 2);
-    const words2 = name2.split("_").filter((w) => w.length > 2);
-
-    const commonWords = words1.filter((word) => words2.includes(word));
-    const totalUniqueWords = new Set([...words1, ...words2]).size;
-
-    return Math.round(((commonWords.length * 2) / totalUniqueWords) * 100);
-  }
-
-  createMyntraLinkedOrder(orderGroup) {
-    const sortedOrders = this.sortOrdersByLifecycleStage(orderGroup);
-    const orderTimeline = this.buildOrderTimeline(sortedOrders);
-    const masterOrder = this.mergeMyntraOrderData(sortedOrders);
-
-    masterOrder.lifecycleProtection = {
-      emailsLinked: orderGroup.length,
-      timeline: orderTimeline,
-      integrityChecks: this.performIntegrityChecks(sortedOrders),
-      linkedAt: new Date().toISOString(),
-      linkingStrategy: "myntra_enhanced",
-    };
-
-    return masterOrder;
-  }
-
-  mergeMyntraOrderData(sortedOrders) {
-    const baseOrder = sortedOrders.reduce((best, current) => {
-      return (current.confidence || 0) > (best.confidence || 0)
-        ? current
-        : best;
-    }, sortedOrders[0]);
-
-    const masterOrder = { ...baseOrder };
-
-    for (const order of sortedOrders) {
-      if (!masterOrder.orderId && order.orderId) {
-        masterOrder.orderId = order.orderId;
-      }
-
-      if (!masterOrder.trackingId && order.trackingId) {
-        masterOrder.trackingId = order.trackingId;
-      }
-
-      if (this.shouldUpdateStatus(masterOrder.status, order.status)) {
-        masterOrder.status = order.status;
-      }
-
-      if (!masterOrder.amount && order.amount) {
-        masterOrder.amount = order.amount;
-      }
-
-      if (order.products && order.products.length > 0 && masterOrder.products) {
-        masterOrder.products = this.mergeProductData(
-          masterOrder.products,
-          order.products
-        );
-      }
-
-      if (!masterOrder.deliveryAddress && order.deliveryAddress) {
-        masterOrder.deliveryAddress = order.deliveryAddress;
-      }
-    }
-
-    masterOrder.isLinkedOrder = sortedOrders.length > 1;
-    masterOrder.linkedEmailCount = sortedOrders.length;
-    masterOrder.linkedEmails = sortedOrders.map((order) => ({
-      emailIndex: order.emailIndex,
-      emailType: order.emailType,
-      status: order.status,
-      orderId: order.orderId,
-      trackingId: order.trackingId,
-      subject: order.originalEmail.headers.subject,
-      timestamp: order.emailTimestamp,
-    }));
-
-    masterOrder.confidence = Math.min(
-      (masterOrder.confidence || 0.7) + sortedOrders.length * 0.1,
-      1.0
-    );
-
-    return masterOrder;
-  }
-
-  // 🔧 UTILITY METHODS
-
-  sortOrdersByLifecycleStage(orderGroup) {
-    return orderGroup.sort((a, b) => {
-      const stageA = this.getLifecycleStage(a);
-      const stageB = this.getLifecycleStage(b);
-
-      if (stageA !== stageB) {
-        return stageA - stageB;
-      }
-
-      const timestampA = a.emailTimestamp || 0;
-      const timestampB = b.emailTimestamp || 0;
-
-      return timestampA - timestampB;
-    });
-  }
-
-  getLifecycleStage(order) {
-    const emailType = order.emailType || "unknown";
-    const status = order.status || "unknown";
-    const subject = order.originalEmail?.headers?.subject?.toLowerCase() || "";
-
-    if (
-      emailType === "order_confirmation" ||
-      status === "confirmed" ||
-      subject.includes("confirmation") ||
-      subject.includes("placed") ||
-      subject.includes("thank you")
-    ) {
-      return 10;
-    }
-
-    if (
-      status === "processing" ||
-      subject.includes("preparing") ||
-      subject.includes("processing")
-    ) {
-      return 20;
-    }
-
-    if (
-      emailType === "shipping_notification" ||
-      status === "shipped" ||
-      subject.includes("shipped") ||
-      subject.includes("dispatched") ||
-      subject.includes("item") ||
-      subject.includes("from your order")
-    ) {
-      return 30;
-    }
-
-    if (
-      emailType === "delivery_notification" ||
-      status === "out_for_delivery" ||
-      subject.includes("out for delivery") ||
-      subject.includes("arriving") ||
-      subject.includes("today")
-    ) {
-      return 40;
-    }
-
-    if (
-      emailType === "delivery_confirmation" ||
-      status === "delivered" ||
-      subject.includes("delivered") ||
-      subject.includes("successfully delivered")
-    ) {
-      return 50;
-    }
-
-    if (
-      subject.includes("review") ||
-      subject.includes("feedback") ||
-      subject.includes("rate")
-    ) {
-      return 60;
-    }
-
-    if (
-      status === "cancelled" ||
-      status === "returned" ||
-      subject.includes("cancelled") ||
-      subject.includes("returned") ||
-      subject.includes("refund")
-    ) {
-      return 70;
-    }
-
-    return 100;
-  }
-
-  buildOrderTimeline(sortedOrders) {
-    return sortedOrders.map((order) => ({
-      emailType: order.emailType || "unknown",
-      status: order.status || "unknown",
-      stage: this.getLifecycleStage(order),
-      date: this.formatEmailDate(order.originalEmail),
-      orderId: order.orderId || null,
-      trackingId: order.trackingId || null,
-      amount: order.amount || null,
-      subject: order.originalEmail?.headers?.subject,
-    }));
-  }
-
-  performIntegrityChecks(sortedOrders) {
-    const checks = {
-      statusProgression: this.checkStatusProgression(sortedOrders),
-      amountConsistency: this.checkAmountConsistency(sortedOrders),
-      productConsistency: this.checkProductConsistency(sortedOrders),
-      dateProgression: this.checkDateProgression(sortedOrders),
-      overall: "unknown",
-    };
-
-    const passedChecks = Object.values(checks).filter(
-      (check) => check === "pass"
-    ).length;
-    const totalChecks = Object.keys(checks).length - 1;
-
-    if (passedChecks === totalChecks) {
-      checks.overall = "excellent";
-    } else if (passedChecks >= totalChecks * 0.75) {
-      checks.overall = "good";
-    } else if (passedChecks >= totalChecks * 0.5) {
-      checks.overall = "acceptable";
-    } else {
-      checks.overall = "poor";
-    }
-
-    return checks;
-  }
-
-  checkStatusProgression(sortedOrders) {
-    const statusHierarchy = {
-      ordered: 1,
-      confirmed: 2,
-      processing: 3,
-      shipped: 4,
-      out_for_delivery: 5,
-      delivered: 6,
-    };
-
-    let lastLevel = 0;
-    let hasRegression = false;
-
-    for (const order of sortedOrders) {
-      const currentLevel = statusHierarchy[order.status] || 0;
-      if (currentLevel < lastLevel) {
-        hasRegression = true;
-      }
-      lastLevel = Math.max(lastLevel, currentLevel);
-    }
-
-    return hasRegression ? "warning" : "pass";
-  }
-
-  checkAmountConsistency(sortedOrders) {
-    const amounts = sortedOrders
-      .map((order) => order.amount)
-      .filter((amount) => amount && amount > 0);
-
-    if (amounts.length === 0) return "na";
-
-    const uniqueAmounts = [...new Set(amounts)];
-
-    if (uniqueAmounts.length === 1) {
-      return "pass";
-    } else if (
-      uniqueAmounts.every((amount) => Math.abs(amount - amounts[0]) <= 1)
-    ) {
-      return "pass";
-    } else {
-      return "warning";
-    }
-  }
-
-  checkProductConsistency(sortedOrders) {
-    const productNames = sortedOrders
-      .map((order) => order.products?.[0]?.name)
-      .filter(
-        (name) =>
-          name &&
-          name !== "Data not available in email" &&
-          !this.isGarbageProductName(name)
-      );
-
-    if (productNames.length === 0) return "na";
-
-    const firstProduct = productNames[0].toLowerCase().replace(/[^\w\s]/g, "");
-    const allSimilar = productNames.every((product) => {
-      const normalized = product.toLowerCase().replace(/[^\w\s]/g, "");
-      return this.calculateStringSimilarity(firstProduct, normalized) > 0.7;
-    });
-
-    return allSimilar ? "pass" : "warning";
-  }
-
-  checkDateProgression(sortedOrders) {
-    let lastTimestamp = 0;
-    let hasRegression = false;
-
-    for (const order of sortedOrders) {
-      const currentTimestamp = order.emailTimestamp || 0;
-      if (currentTimestamp < lastTimestamp) {
-        hasRegression = true;
-      }
-      lastTimestamp = currentTimestamp;
-    }
-
-    return hasRegression ? "warning" : "pass";
-  }
-
-  mergeProductData(existingProducts, newProducts) {
-    if (!existingProducts || existingProducts.length === 0) return newProducts;
-    if (!newProducts || newProducts.length === 0) return existingProducts;
-
-    const mergedProducts = [...existingProducts];
-
-    for (const newProduct of newProducts) {
-      const existingIndex = mergedProducts.findIndex(
-        (existing) =>
-          this.calculateStringSimilarity(
-            existing.name?.toLowerCase() || "",
-            newProduct.name?.toLowerCase() || ""
-          ) > 0.8
-      );
-
-      if (existingIndex >= 0) {
-        const existing = mergedProducts[existingIndex];
-        mergedProducts[existingIndex] = {
-          ...existing,
-          description: existing.description || newProduct.description,
-          brand: existing.brand || newProduct.brand,
-          category: existing.category || newProduct.category,
-          image_url: existing.image_url || newProduct.image_url,
-          product_url: existing.product_url || newProduct.product_url,
-          unit_price: existing.unit_price || newProduct.unit_price,
-          total_price: existing.total_price || newProduct.total_price,
-        };
-      } else {
-        mergedProducts.push(newProduct);
-      }
-    }
-
-    return mergedProducts;
-  }
-
-  calculateStringSimilarity(str1, str2) {
-    if (!str1 || !str2) return 0;
-
-    const longer = str1.length > str2.length ? str1 : str2;
-    const shorter = str1.length > str2.length ? str2 : str1;
-
-    if (longer.length === 0) return 1.0;
-
-    const editDistance = this.levenshteinDistance(longer, shorter);
-    return (longer.length - editDistance) / longer.length;
-  }
-
-  levenshteinDistance(str1, str2) {
-    const matrix = [];
-
-    for (let i = 0; i <= str2.length; i++) {
-      matrix[i] = [i];
-    }
-
-    for (let j = 0; j <= str1.length; j++) {
-      matrix[0][j] = j;
-    }
-
-    for (let i = 1; i <= str2.length; i++) {
-      for (let j = 1; j <= str1.length; j++) {
-        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-          matrix[i][j] = matrix[i - 1][j - 1];
-        } else {
-          matrix[i][j] = Math.min(
-            matrix[i - 1][j - 1] + 1,
-            matrix[i][j - 1] + 1,
-            matrix[i - 1][j] + 1
-          );
-        }
-      }
-    }
-
-    return matrix[str2.length][str1.length];
-  }
-
-  shouldUpdateStatus(currentStatus, newStatus) {
-    const statusHierarchy = {
-      ordered: 1,
-      confirmed: 2,
-      processing: 3,
-      shipped: 4,
-      out_for_delivery: 5,
-      delivered: 6,
-      cancelled: 0,
-      returned: 0,
-    };
-
-    const currentLevel = statusHierarchy[currentStatus] || 1;
-    const newLevel = statusHierarchy[newStatus] || 1;
-
-    return newLevel > currentLevel || newLevel === 0;
-  }
-
-  // 🔧 EMAIL PARSING AND VALIDATION
-
   parseEmailWithValidation(email) {
     try {
+      // Use your existing parser factory
       const parsedData = parserFactory.parseEmail({
         from: email.headers.from,
         subject: email.headers.subject,
@@ -1704,22 +325,32 @@ class SyncService {
 
       if (!parsedData) return null;
 
+      // Additional validation to ensure data quality
       const validatedData = this.validateParsedData(parsedData);
+
+      // Clean and standardize the data
       return this.cleanParsedData(validatedData);
     } catch (error) {
+      console.error("❌ Parsing error:", error.message);
       return null;
     }
   }
 
+  /**
+   * Validate parsed data quality and completeness
+   */
   validateParsedData(parsedData) {
-    if (!parsedData.orderId && !parsedData.trackingId) {
-      throw new Error(`No valid order ID or tracking ID found`);
+    // Validate order ID
+    if (!parsedData.orderId || !this.isValidOrderId(parsedData.orderId)) {
+      throw new Error(`Invalid order ID: ${parsedData.orderId}`);
     }
 
+    // Validate platform
     if (!parsedData.platform) {
       throw new Error("Missing platform information");
     }
 
+    // Validate products array
     if (parsedData.products && Array.isArray(parsedData.products)) {
       parsedData.products = parsedData.products.filter((product) =>
         this.isValidProduct(product)
@@ -1729,11 +360,13 @@ class SyncService {
     return parsedData;
   }
 
+  /**
+   * Clean parsed data and mark missing fields appropriately
+   */
   cleanParsedData(parsedData) {
     return {
       platform: parsedData.platform,
-      orderId: parsedData.orderId || null,
-      trackingId: parsedData.trackingId || null,
+      orderId: parsedData.orderId,
       amount: parsedData.amount || null,
       formattedAmount: parsedData.amount
         ? `₹${parsedData.amount}`
@@ -1741,14 +374,17 @@ class SyncService {
       products: this.cleanProductsData(parsedData.products || []),
       orderDate: parsedData.orderDate || new Date(),
       status: this.standardizeOrderStatus(parsedData.status),
+      trackingId: parsedData.trackingId || "Data not available in email",
       emailType: parsedData.emailType || "unknown",
       confidence: parsedData.confidence || 0.7,
       extractedAt: new Date().toISOString(),
-      deliveryAddress: parsedData.deliveryAddress || null,
       dataAvailability: this.assessDataAvailability(parsedData),
     };
   }
 
+  /**
+   * Clean products data and remove garbage
+   */
   cleanProductsData(products) {
     if (!Array.isArray(products) || products.length === 0) {
       return [
@@ -1761,46 +397,422 @@ class SyncService {
       ];
     }
 
-    const validProducts = products.filter(
-      (product) =>
-        this.isValidProduct(product) && !this.isGarbageProductName(product.name)
-    );
-
-    if (validProducts.length === 0) {
-      return [
-        {
-          name: "Data not available in email",
-          quantity: "Data not available in email",
-          price: "Data not available in email",
-          formattedPrice: "Data not available in email",
-        },
-      ];
-    }
-
-    return validProducts.map((product) => ({
-      name: product.name || "Unknown Product",
-      quantity: product.quantity || 1,
-      price: product.price || product.unit_price || 0,
+    return products.map((product) => ({
+      name: product.name || "Data not available in email",
+      quantity: product.quantity || "Data not available in email",
+      price: product.price || null,
       formattedPrice: product.price
         ? `₹${product.price}`
         : "Data not available in email",
       type: product.type || "item",
-      description: product.description || null,
-      image_url: product.image_url || null,
-      product_url: product.product_url || null,
-      sku: product.sku || null,
-      brand: product.brand || null,
-      category: product.category || null,
-      attributes: product.attributes || null,
     }));
   }
 
-  isGarbageProductName(name) {
-    if (!name || typeof name !== "string") return true;
+  /**
+   * Assess what data is available vs missing
+   */
+  assessDataAvailability(parsedData) {
+    return {
+      hasOrderId: !!parsedData.orderId,
+      hasAmount: !!parsedData.amount,
+      hasProducts: !!(parsedData.products && parsedData.products.length > 0),
+      hasTrackingId: !!parsedData.trackingId,
+      hasOrderDate: !!parsedData.orderDate,
+      dataCompleteness: this.calculateDataCompleteness(parsedData),
+    };
+  }
 
-    const nameLower = name.toLowerCase().trim();
-    if (nameLower.length < 5) return true;
+  /**
+   * Calculate data completeness score
+   */
+  calculateDataCompleteness(parsedData) {
+    const fields = ["orderId", "amount", "products", "trackingId", "orderDate"];
+    const availableFields = fields.filter((field) => {
+      if (field === "products")
+        return parsedData.products && parsedData.products.length > 0;
+      return !!parsedData[field];
+    });
 
+    return Math.round((availableFields.length / fields.length) * 100);
+  }
+
+  /**
+   * 🔄 Process individual order email with smart update logic
+   */
+  async processOrderEmail(
+    parsedData,
+    email,
+    existingOrderInSync,
+    existingOrderInDB,
+    userId,
+    syncId,
+    emailIndex
+  ) {
+    const orderKey = `${parsedData.platform}-${parsedData.orderId}`;
+
+    console.log(`🔍 Processing order: ${orderKey}`);
+    console.log(`📧 Email type: ${parsedData.emailType}`);
+    console.log(`📊 Current status: ${parsedData.status}`);
+
+    // Case 1: First time seeing this order in current sync
+    if (!existingOrderInSync && !existingOrderInDB) {
+      console.log(`🆕 NEW ORDER: Creating first entry for ${orderKey}`);
+      const newOrder = await this.createNewOrder(
+        parsedData,
+        userId,
+        syncId,
+        email
+      );
+
+      return {
+        action: "created",
+        order: newOrder,
+        reason: "first_time_order_creation",
+      };
+    }
+
+    // Case 2: Order exists in current sync - check for updates
+    if (existingOrderInSync) {
+      console.log(`🔄 SYNC UPDATE: Checking updates for ${orderKey}`);
+      return await this.handleOrderUpdateInSync(
+        existingOrderInSync,
+        parsedData,
+        email,
+        emailIndex
+      );
+    }
+
+    // Case 3: Order exists in DB from previous sync - check for updates
+    if (existingOrderInDB) {
+      console.log(
+        `🔄 DB UPDATE: Checking updates for existing DB order ${orderKey}`
+      );
+      return await this.handleOrderUpdateInDB(
+        existingOrderInDB,
+        parsedData,
+        email,
+        syncId
+      );
+    }
+
+    return {
+      action: "skipped",
+      reason: "unknown_case",
+      order: null,
+    };
+  }
+
+  /**
+   * Handle order updates within current sync
+   */
+  async handleOrderUpdateInSync(existingOrder, parsedData, email, emailIndex) {
+    const updates = this.detectOrderChanges(existingOrder, parsedData);
+
+    if (updates.hasChanges) {
+      console.log(
+        `✅ SYNC UPDATE: Changes detected for ${existingOrder.platform}-${existingOrder.platform_order_id}`
+      );
+      console.log(`📝 Changes: ${updates.changes.join(", ")}`);
+
+      // Update the order with new information
+      const updatedOrder = await this.applyOrderUpdates(
+        existingOrder,
+        parsedData,
+        updates.updateData
+      );
+
+      return {
+        action: "updated",
+        order: updatedOrder,
+        reason: "sync_update",
+        changes: updates.changes,
+      };
+    } else {
+      console.log(
+        `⏭️ SYNC SKIP: No changes detected for ${existingOrder.platform}-${existingOrder.platform_order_id}`
+      );
+      return {
+        action: "skipped",
+        reason: "no_changes_in_sync",
+        order: existingOrder,
+      };
+    }
+  }
+
+  /**
+   * Handle order updates for existing DB records
+   */
+  async handleOrderUpdateInDB(existingOrder, parsedData, email, syncId) {
+    const updates = this.detectOrderChanges(existingOrder, parsedData);
+
+    if (updates.hasChanges) {
+      console.log(
+        `✅ DB UPDATE: Changes detected for ${existingOrder.platform}-${existingOrder.platform_order_id}`
+      );
+      console.log(`📝 Changes: ${updates.changes.join(", ")}`);
+
+      // Update database record
+      const updateData = {
+        ...updates.updateData,
+        sync_id: syncId,
+        last_updated: new Date(),
+      };
+
+      await existingOrder.update(updateData);
+
+      return {
+        action: "updated",
+        order: await existingOrder.reload(),
+        reason: "db_update",
+        changes: updates.changes,
+      };
+    } else {
+      console.log(
+        `⏭️ DB SKIP: No changes detected for ${existingOrder.platform}-${existingOrder.platform_order_id}`
+      );
+      return {
+        action: "skipped",
+        reason: "no_changes_in_db",
+        order: existingOrder,
+      };
+    }
+  }
+
+  /**
+   * 🔍 Detect meaningful changes between existing and new order data
+   */
+  detectOrderChanges(existingOrder, newParsedData) {
+    const changes = [];
+    const updateData = {};
+
+    // Check status progression (only update if more advanced)
+    if (this.shouldUpdateStatus(existingOrder.status, newParsedData.status)) {
+      changes.push(`status: ${existingOrder.status} → ${newParsedData.status}`);
+      updateData.status = newParsedData.status;
+
+      // Update delivery date if status is delivered
+      if (
+        newParsedData.status === "delivered" &&
+        !existingOrder.delivered_date
+      ) {
+        updateData.delivered_date = new Date();
+        changes.push("delivery_date: added");
+      }
+    }
+
+    // Add tracking information if missing
+    if (newParsedData.trackingId && !existingOrder.tracking_number) {
+      changes.push(`tracking: added ${newParsedData.trackingId}`);
+      updateData.tracking_number = newParsedData.trackingId;
+    }
+
+    // Update amount if missing and new data has it
+    if (
+      newParsedData.amount &&
+      (!existingOrder.total_amount || existingOrder.total_amount === 0)
+    ) {
+      changes.push(`amount: added ₹${newParsedData.amount}`);
+      updateData.total_amount = newParsedData.amount;
+    }
+
+    // Update product name if missing and new data has better info
+    if (newParsedData.products && newParsedData.products.length > 0) {
+      const newProductName = newParsedData.products[0].name;
+      if (
+        newProductName &&
+        newProductName !== "Data not available in email" &&
+        (!existingOrder.product_name ||
+          existingOrder.product_name.includes("Order") ||
+          existingOrder.product_name === "Data not available in email")
+      ) {
+        changes.push(
+          `product: updated to ${newProductName.substring(0, 30)}...`
+        );
+        updateData.product_name = newProductName;
+      }
+    }
+
+    return {
+      hasChanges: changes.length > 0,
+      changes,
+      updateData,
+    };
+  }
+
+  /**
+   * Apply updates to existing order
+   */
+  async applyOrderUpdates(existingOrder, parsedData, updateData) {
+    // If it's a database record, update it
+    if (existingOrder.update) {
+      await existingOrder.update({
+        ...updateData,
+        last_updated: new Date(),
+      });
+      return await existingOrder.reload();
+    }
+
+    // If it's an in-memory object, merge the updates
+    return {
+      ...existingOrder,
+      ...updateData,
+      last_updated: new Date(),
+    };
+  }
+
+  /**
+   * Find existing order in database
+   */
+  async findExistingOrder(userId, platform, orderId) {
+    return await Order.findOne({
+      where: {
+        user_id: userId,
+        platform: platform,
+        platform_order_id: orderId,
+      },
+    });
+  }
+
+  /**
+   * Create new order with comprehensive data handling
+   */
+  async createNewOrder(parsedData, userId, syncId, email) {
+    console.log(
+      `🆕 Creating new order: ${parsedData.platform}-${parsedData.orderId}`
+    );
+
+    const orderData = {
+      user_id: userId,
+      platform: parsedData.platform,
+      order_id: parsedData.orderId,
+      platform_order_id: parsedData.orderId,
+      product_name: this.getCleanProductName(parsedData),
+      total_amount: parsedData.amount || 0,
+      currency: "INR",
+      order_date: parsedData.orderDate || new Date(),
+      status: parsedData.status || "ordered",
+      tracking_number: parsedData.trackingId || null,
+      delivered_date: parsedData.status === "delivered" ? new Date() : null,
+      email_message_id: email.messageId,
+      raw_email_data: JSON.stringify(email),
+      parsed_data: parsedData,
+      confidence_score: parsedData.confidence || 0.8,
+      sync_id: syncId,
+      last_updated: new Date(),
+      hash: getOrderHash({
+        platform: parsedData.platform,
+        orderId: parsedData.orderId,
+        userId,
+      }),
+    };
+
+    const order = await Order.create(orderData);
+
+    // Create order items if available
+    if (parsedData.products && parsedData.products.length > 0) {
+      await this.createOrderItems(order.id, parsedData.products);
+    }
+
+    console.log(`✅ Order created successfully: ${order.id}`);
+    return order;
+  }
+
+  /**
+   * Get clean product name with fallbacks
+   */
+  getCleanProductName(parsedData) {
+    if (parsedData.products && parsedData.products.length > 0) {
+      const productName = parsedData.products[0].name;
+      if (productName && productName !== "Data not available in email") {
+        return productName.length > 100
+          ? productName.substring(0, 100) + "..."
+          : productName;
+      }
+    }
+
+    // Fallback to platform + order ID
+    const platform =
+      parsedData.platform.charAt(0).toUpperCase() +
+      parsedData.platform.slice(1);
+    return `${platform} Order ${parsedData.orderId}`;
+  }
+
+  /**
+   * Create order items with validation
+   */
+  async createOrderItems(orderId, products) {
+    const validItems = products.filter(
+      (item) =>
+        item.name &&
+        item.name !== "Data not available in email" &&
+        item.name.length > 2
+    );
+
+    if (validItems.length === 0) return;
+
+    const itemsToCreate = validItems.map((item) => ({
+      order_id: orderId,
+      name: item.name,
+      quantity: parseInt(item.quantity) || 1,
+      unit_price: parseFloat(item.price) || 0,
+      total_price: parseFloat(item.price) * (parseInt(item.quantity) || 1) || 0,
+    }));
+
+    await OrderItem.bulkCreate(itemsToCreate);
+    console.log(`📦 Created ${itemsToCreate.length} order items`);
+  }
+
+  /**
+   * Standardize order status across platforms
+   */
+  standardizeOrderStatus(status) {
+    if (!status) return "ordered";
+
+    const statusLower = status.toLowerCase();
+
+    if (statusLower.includes("delivered")) return "delivered";
+    if (statusLower.includes("shipped") || statusLower.includes("dispatched"))
+      return "shipped";
+    if (statusLower.includes("confirmed") || statusLower.includes("placed"))
+      return "confirmed";
+    if (statusLower.includes("cancelled")) return "cancelled";
+    if (statusLower.includes("returned")) return "returned";
+
+    return "ordered";
+  }
+
+  /**
+   * Determine if status should be updated (status progression)
+   */
+  shouldUpdateStatus(currentStatus, newStatus) {
+    const statusHierarchy = {
+      ordered: 1,
+      confirmed: 2,
+      shipped: 3,
+      out_for_delivery: 4,
+      delivered: 5,
+      cancelled: 0,
+      returned: 0,
+    };
+
+    const currentLevel = statusHierarchy[currentStatus] || 1;
+    const newLevel = statusHierarchy[newStatus] || 1;
+
+    return newLevel > currentLevel;
+  }
+
+  /**
+   * Validate product data quality
+   */
+  isValidProduct(product) {
+    if (!product || !product.name) return false;
+
+    const name = product.name.toString().trim();
+
+    // Reject empty or too short names
+    if (name.length < 3) return false;
+
+    // Reject HTML/CSS garbage using your existing patterns
     const garbagePatterns = [
       /background-image/i,
       /url\(https?/i,
@@ -1818,41 +830,50 @@ class SyncService {
       /class\s*=/i,
       /^[\d\s.,;:-]+$/,
       /^[a-f0-9]{10,}$/i,
-      /supercoin|saved using|early access|flipkart plus|coin.*used/i,
-      /reward|loyalty|member|benefit|cashback|points/i,
-      /^(order|item|shipment|delivery|payment|total|amount)$/i,
-      /continue shopping|shop now|download app/i,
-      /terms.*conditions|privacy.*policy|unsubscribe/i,
     ];
 
-    return garbagePatterns.some((pattern) => pattern.test(nameLower));
+    return !garbagePatterns.some((pattern) => pattern.test(name));
   }
 
-  isValidProduct(product) {
-    if (!product || !product.name) return false;
-    const name = product.name.toString().trim();
-    if (name.length < 5) return false;
-    return !this.isGarbageProductName(name);
+  /**
+   * Enhanced order ID validation
+   */
+  isValidOrderId(orderId) {
+    if (!orderId || typeof orderId !== "string") return false;
+
+    // Platform-specific validation
+    if (/^\d{3}-\d{7,8}-\d{7,8}$/.test(orderId)) return true; // Amazon
+    if (/^OD\d{15,21}$/i.test(orderId)) return true; // Flipkart
+    if (/^\d{12,18}$/.test(orderId)) return true; // Swiggy/others
+    if (/^[A-Z]{2,4}\d{10,20}$/i.test(orderId)) return true; // Generic letter+number
+
+    // Reject invalid patterns
+    const invalidPatterns = [
+      /^(value|table|radius|ffffff|style|width|height|px)$/i,
+      /^.{0,2}$/,
+      /^.{101,}$/,
+      /^[\d.]+$/,
+      /^[a-f0-9]{32,}$/i,
+    ];
+
+    return !invalidPatterns.some((pattern) => pattern.test(orderId));
   }
 
-  standardizeOrderStatus(status) {
-    if (!status) return "ordered";
+  /**
+   * Get email date range for logging
+   */
+  getEmailDateRange(emails) {
+    if (emails.length === 0) return "No emails";
 
-    const statusLower = status.toLowerCase();
+    const oldest = emails[0];
+    const newest = emails[emails.length - 1];
 
-    if (statusLower.includes("delivered")) return "delivered";
-    if (statusLower.includes("shipped") || statusLower.includes("dispatched"))
-      return "shipped";
-    if (statusLower.includes("confirmed") || statusLower.includes("placed"))
-      return "confirmed";
-    if (statusLower.includes("cancelled")) return "cancelled";
-    if (statusLower.includes("returned")) return "returned";
-    if (statusLower.includes("out for delivery")) return "out_for_delivery";
-    if (statusLower.includes("processing")) return "processing";
-
-    return "ordered";
+    return `${this.formatEmailDate(oldest)} → ${this.formatEmailDate(newest)}`;
   }
 
+  /**
+   * Format email date for display
+   */
   formatEmailDate(email) {
     if (!email || !email.internalDate) return "No date";
 
@@ -1860,35 +881,19 @@ class SyncService {
     return (
       date.toLocaleDateString("en-IN") +
       " " +
-      date.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+      date.toLocaleTimeString("en-IN", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
     );
   }
 
-  calculateDataCompleteness(parsedData) {
-    const fields = ["orderId", "trackingId", "amount", "products", "orderDate"];
-    const availableFields = fields.filter((field) => {
-      if (field === "products")
-        return parsedData.products && parsedData.products.length > 0;
-      return !!parsedData[field];
-    });
-
-    return Math.round((availableFields.length / fields.length) * 100);
-  }
-
-  assessDataAvailability(parsedData) {
-    return {
-      hasOrderId: !!parsedData.orderId,
-      hasTrackingId: !!parsedData.trackingId,
-      hasAmount: !!parsedData.amount,
-      hasProducts: !!(parsedData.products && parsedData.products.length > 0),
-      hasOrderDate: !!parsedData.orderDate,
-      dataCompleteness: this.calculateDataCompleteness(parsedData),
-    };
-  }
-
-  // 📧 SYNC MANAGEMENT METHODS
-
+  /**
+   * Handle case when no emails are found
+   */
   async handleNoEmailsFound(syncRecord, daysToFetch, maxResults) {
+    console.log("⚠️ No emails found matching search criteria");
+
     await syncRecord.update({
       status: "completed",
       completed_at: new Date(),
@@ -1915,6 +920,9 @@ class SyncService {
     };
   }
 
+  /**
+   * Complete sync and return results for frontend
+   */
   async completeSyncWithResults(
     syncRecord,
     processResult,
@@ -1928,11 +936,8 @@ class SyncService {
       ordersUpdated: processResult.ordersUpdated,
       ordersSkipped: processResult.ordersSkipped,
       parsingErrors: processResult.parsingErrors,
-      totalLinksFound: processResult.totalLinksFound,
-      deliveryUpdatesApplied: processResult.deliveryUpdatesApplied || 0,
-      platforms: Object.keys(processResult.platformStats || {}),
-      platformStats: processResult.platformStats,
-      processingStrategy: "delivery_priority_with_enhanced_parsing",
+      platforms: this.getProcessedPlatforms(processResult.processedOrders),
+      processingStrategy: "chronological_with_smart_updates",
       dataQuality: this.assessOverallDataQuality(processResult.processedOrders),
       success: processResult.ordersCreated + processResult.ordersUpdated > 0,
     };
@@ -1954,7 +959,7 @@ class SyncService {
     });
 
     logger.info(
-      `Enhanced sync completed: ${processResult.ordersCreated} created, ${processResult.ordersUpdated} updated, ${processResult.deliveryUpdatesApplied} delivery updates`
+      `Enhanced chronological sync completed: ${processResult.ordersCreated} created, ${processResult.ordersUpdated} updated`
     );
 
     return {
@@ -1963,8 +968,6 @@ class SyncService {
       ordersSaved: processResult.ordersCreated,
       ordersUpdated: processResult.ordersUpdated,
       emailsProcessed: processResult.emailsProcessed,
-      deliveryUpdatesApplied: processResult.deliveryUpdatesApplied,
-      totalLinksFound: processResult.totalLinksFound,
       summary: syncSummary,
       configuration: { daysToFetch, maxResults },
       orders: processResult.processedOrders.map((order) =>
@@ -1973,6 +976,9 @@ class SyncService {
     };
   }
 
+  /**
+   * Format order data for frontend consumption
+   */
   formatOrderForFrontend(order) {
     return {
       id: order.id,
@@ -1988,13 +994,14 @@ class SyncService {
       trackingNumber: order.tracking_number || "Data not available in email",
       deliveredDate: order.delivered_date,
       confidence: order.confidence_score,
-      isLinkedOrder: order.parsed_data?.isLinkedOrder || false,
-      linkedEmailCount: order.parsed_data?.linkedEmailCount || 1,
       dataCompleteness: this.calculateDataCompletenessFromOrder(order),
       lastUpdated: order.last_updated,
     };
   }
 
+  /**
+   * Calculate data completeness from order record
+   */
   calculateDataCompletenessFromOrder(order) {
     const fields = [
       "platform_order_id",
@@ -2011,6 +1018,9 @@ class SyncService {
     return Math.round((availableFields.length / fields.length) * 100);
   }
 
+  /**
+   * Assess overall data quality for the sync
+   */
   assessOverallDataQuality(processedOrders) {
     if (processedOrders.length === 0)
       return { completeness: 0, quality: "no_data" };
@@ -2035,8 +1045,16 @@ class SyncService {
     };
   }
 
-  // 📊 SYNC STATUS AND HISTORY METHODS
+  /**
+   * Get platforms that were processed in this sync
+   */
+  getProcessedPlatforms(processedOrders) {
+    const platforms = new Set();
+    processedOrders.forEach((order) => platforms.add(order.platform));
+    return Array.from(platforms);
+  }
 
+  // Keep existing methods for compatibility...
   async getSyncStatus(userId, syncId) {
     const syncRecord = await EmailSync.findOne({
       where: { id: syncId, user_id: userId },
@@ -2080,6 +1098,9 @@ class SyncService {
     }));
   }
 
+  /**
+   * Get sync statistics for a user
+   */
   async getSyncStats(userId) {
     const [totalSyncs, completedSyncs, totalOrders] = await Promise.all([
       EmailSync.count({ where: { user_id: userId } }),
